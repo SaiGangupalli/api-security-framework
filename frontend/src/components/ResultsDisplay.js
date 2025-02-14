@@ -171,17 +171,192 @@ const AnalysisCoverage = ({ analyzed_components }) => (
   </div>
 );
 
+const assignRelevanceScores = (test_cases, risk_assessment) => {
+
+  if (!risk_assessment) {
+      console.warn('Risk assessment data is missing');
+      return test_cases.map(suite => ({
+        ...suite,
+        relevance_score: 0,
+        risk_score: 0
+      }));
+    }
+
+  // Map of test types to their corresponding risk types
+  const riskMapping = {
+    'Authentication Bypass': 'auth_bypass_risk',
+    'SQL Injection Test': 'sql_injection_risk',
+    'Cross-Site Scripting (XSS) Test': 'xss_risk',
+    'Rate Limiting Test': 'rate_limiting_risk',
+    'Data Exposure and Leakage': 'auth_bypass_risk', // Map similar tests
+    'SQL Injection': 'sql_injection_risk',
+    'Command Injection': 'command_injection_risk',
+    'Path Traversal': 'path_traversal_risk',
+  };
+
+  return test_cases.map(suite => {
+    // If it already has a relevance score, return as is
+    if (suite.relevance_score !== undefined && suite.risk_score !== undefined) {
+      return suite;
+    }
+
+    // Find corresponding risk score from risk assessment
+    const riskType = riskMapping[suite.type];
+    const riskScore = riskType ? risk_assessment[riskType] : 0;
+
+    // Calculate relevance score based on risk score and type
+    // Using a formula similar to the RAG system
+    const baseRelevance = riskScore * 3 + 1.5; // Scale to match RAG scores (typically 2.0-2.5)
+
+    return {
+      ...suite,
+      relevance_score: baseRelevance,
+      risk_score: riskScore
+    };
+  });
+};
+
+const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
+  // Transform and sort test cases data for visualization
+  const relevanceData = test_cases
+    .map(suite => {
+      const assignedSuite = suite.relevance_score !== undefined ? suite :
+        assignRelevanceScores([suite], risk_assessment)[0];
+      return {
+        name: suite.type,
+        relevance: parseFloat(assignedSuite.relevance_score?.toFixed(2) || "0"),
+        risk: parseFloat((assignedSuite.risk_score * 100)?.toFixed(1) || "0")
+      };
+    })
+    .sort((a, b) => b.relevance - a.relevance);
+
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-white p-3 rounded-lg shadow border">
+          <p className="font-medium text-gray-900">{label}</p>
+          <p className="text-blue-600">Relevance Score: {payload[0].value.toFixed(2)}</p>
+          <p className="text-red-600">Risk Score: {payload[1].value.toFixed(1)}%</p>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // Calculate max relevance for scaling
+  const maxRelevance = Math.max(...relevanceData.map(d => d.relevance), 3);
+
+  return (
+    <div className="bg-white p-6 rounded-lg shadow-sm mb-6">
+      <h3 className="text-xl font-bold text-gray-900 mb-4">Test Case Relevance Analysis</h3>
+      <div className="h-80">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={relevanceData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis
+              dataKey="name"
+              angle={-45}
+              textAnchor="end"
+              height={70}
+              interval={0}
+              tick={{fontSize: 12}}
+            />
+            <YAxis
+              yAxisId="relevance"
+              orientation="left"
+              label={{ value: 'Relevance Score', angle: -90, position: 'insideLeft' }}
+              domain={[0, maxRelevance]}
+            />
+            <YAxis
+              yAxisId="risk"
+              orientation="right"
+              label={{ value: 'Risk Score (%)', angle: 90, position: 'insideRight' }}
+              domain={[0, 100]}
+            />
+            <Tooltip content={<CustomTooltip />} />
+            <Bar yAxisId="relevance" dataKey="relevance" name="Relevance Score" fill="#3b82f6" />
+            <Bar yAxisId="risk" dataKey="risk" name="Risk Score (%)" fill="#ef4444" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="mt-6">
+        <h4 className="font-semibold text-lg mb-3">Score Distribution</h4>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {relevanceData.map((item) => (
+            <div key={item.name} className="bg-gray-50 p-4 rounded-lg">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-medium text-gray-700">{item.name}</span>
+                <div className="flex gap-4">
+                  <span className="text-blue-600">{item.relevance.toFixed(2)}</span>
+                  <span className="text-red-600">{item.risk.toFixed(1)}%</span>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-500"
+                    style={{ width: `${(item.relevance / maxRelevance) * 100}%` }}
+                  />
+                </div>
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-red-500 transition-all duration-500"
+                    style={{ width: `${item.risk}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const RelevanceIndicator = ({ score, riskScore }) => {
+  const getRelevanceColor = (score) => {
+    if (score >= 2.0) return 'bg-blue-600';
+    if (score >= 1.0) return 'bg-blue-400';
+    return 'bg-blue-300';
+  };
+
+  return (
+    <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2">
+        <div className={`w-2 h-2 rounded-full ${getRelevanceColor(score)}`} />
+        <span className="text-sm text-gray-600">
+          {score.toFixed(2)} relevance
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className={`w-2 h-2 rounded-full ${
+          riskScore > 0.7 ? 'bg-red-600' :
+          riskScore > 0.4 ? 'bg-yellow-400' :
+          'bg-green-400'
+        }`} />
+        <span className="text-sm text-gray-600">
+          {(riskScore * 100).toFixed(1)}% risk
+        </span>
+      </div>
+    </div>
+  );
+};
+
 const TestCase = ({ test }) => (
   <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
-    <div className="flex justify-between items-start gap-4">
-      <h4 className="font-semibold text-lg text-blue-800 break-words flex-1">{test.name}</h4>
-      <span className={`shrink-0 px-3 py-1 rounded-full text-sm font-medium ${
-        test.priority === 'Critical' ? 'bg-red-100 text-red-800' :
-        test.priority === 'High' ? 'bg-orange-100 text-orange-800' :
-        'bg-yellow-100 text-yellow-800'
-      }`}>
-        {test.priority}
-      </span>
+    <div className="flex flex-col gap-2">
+      <div className="flex justify-between items-start gap-4">
+        <h4 className="font-semibold text-lg text-blue-800 break-words flex-1">{test.name}</h4>
+        <span className={`shrink-0 px-3 py-1 rounded-full text-sm font-medium ${
+          test.priority === 'Critical' ? 'bg-red-100 text-red-800' :
+          test.priority === 'High' ? 'bg-orange-100 text-orange-800' :
+          'bg-yellow-100 text-yellow-800'
+        }`}>
+          {test.priority}
+        </span>
+      </div>
+      <RelevanceIndicator score={test.relevance_score || 0} riskScore={test.risk_score || 0} />
     </div>
 
     <p className="text-gray-600 mt-2 break-words whitespace-pre-wrap">{test.description}</p>
@@ -225,18 +400,42 @@ const TestCase = ({ test }) => (
   </div>
 );
 
-const TestSuite = ({ suite }) => (
-  <div className="mb-6 p-6 bg-white rounded-lg shadow-sm hover:shadow transition-shadow overflow-hidden">
-    <h3 className="text-xl font-bold text-gray-900 break-words">{suite.type}</h3>
-    <p className="text-gray-600 mt-1 break-words whitespace-pre-wrap">{suite.description}</p>
 
-    <div className="mt-4 space-y-4">
-      {suite.test_cases?.map((test, idx) => (
-        <TestCase key={idx} test={test} />
-      ))}
+const TestSuite = ({ suite, risk_assessment }) => {
+  // Calculate relevance and risk scores if they don't exist
+  const assignedSuite = suite.relevance_score !== undefined ? suite :
+    assignRelevanceScores([suite], risk_assessment)[0];
+
+  // Extract scores from the suite level
+  const relevanceScore = assignedSuite.relevance_score || 0;
+  const riskScore = assignedSuite.risk_score || 0;
+
+  return (
+    <div className="mb-6 p-6 bg-white rounded-lg shadow-sm hover:shadow transition-shadow overflow-hidden">
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <h3 className="text-xl font-bold text-gray-900 break-words">{suite.type}</h3>
+          <p className="text-gray-600 mt-1 break-words whitespace-pre-wrap">{suite.description}</p>
+        </div>
+        <RelevanceIndicator score={relevanceScore} riskScore={riskScore} />
+      </div>
+
+      <div className="mt-4 space-y-4">
+        {suite.test_cases?.map((test, idx) => (
+          <TestCase
+            key={idx}
+            test={{
+              ...test,
+              relevance_score: relevanceScore,
+              risk_score: riskScore
+            }}
+          />
+        ))}
+      </div>
     </div>
-  </div>
-);
+  );
+};
+
 
 const ModelPerformanceGraphs = () => {
   const [performanceData, setPerformanceData] = useState(null);
@@ -365,17 +564,52 @@ const ModelPerformanceGraphs = () => {
   );
 };
 
+const TabPanel = ({ children, className = "" }) => (
+  <div className={`bg-white rounded-lg shadow p-6 ${className}`}>
+    {children}
+  </div>
+);
+
+const TabButton = ({ active, onClick, children }) => (
+  <button
+    onClick={onClick}
+    className={`px-4 py-2 font-medium rounded-lg transition-colors ${
+      active
+        ? 'bg-blue-600 text-white'
+        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+    }`}
+  >
+    {children}
+  </button>
+);
+
 const ResultsDisplay = ({ results, onReset }) => {
+  const [activeTab, setActiveTab] = useState('risk');
   if (!results) return null;
 
   const { api_details = {}, es_details = null, risk_assessment = {}, test_cases = [] } = results;
 
-  // Console log for debugging
-  console.log('Risk Assessment Data:', risk_assessment);
+  const tabs = [
+    { id: 'risk', label: 'Risk Assessment' },
+    { id: 'performance', label: 'Model Performance' },
+    { id: 'relevance', label: 'Test Case Relevance' },
+    { id: 'tests', label: 'Security Tests' }
+  ];
 
   return (
     <div className="mt-8 max-w-7xl mx-auto">
-      <div className="mb-4 flex justify-end">
+      <div className="mb-4 flex justify-between items-center">
+        <div className="flex gap-2">
+          {tabs.map(tab => (
+            <TabButton
+              key={tab.id}
+              active={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </TabButton>
+          ))}
+        </div>
         <button
           onClick={onReset}
           className="bg-gray-200 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-300 transition-colors"
@@ -440,44 +674,46 @@ const ResultsDisplay = ({ results, onReset }) => {
           </div>
         </div>
 
-        {/* Right Column - Risk Assessment & Test Cases */}
+        {/* Right Column - Tabbed Content */}
         <div className="w-3/5">
-          {/* Risk Assessment */}
-          <div className="bg-white p-6 rounded-lg shadow mb-6">
-            <h3 className="font-semibold text-xl text-gray-900 mb-6">Risk Assessment</h3>
+          {activeTab === 'risk' && (
+            <TabPanel>
+              <h3 className="font-semibold text-xl text-gray-900 mb-6">Risk Assessment</h3>
+              <RiskScores risk_assessment={risk_assessment} />
+              <ConfidenceScores
+                confidence_scores={risk_assessment.confidence_scores || {}}
+                overall_accuracy={risk_assessment.overall_accuracy || 0}
+              />
+              <AnalysisCoverage analyzed_components={risk_assessment.analyzed_components || {}} />
+            </TabPanel>
+          )}
 
-            {/* Risk Scores */}
-            <RiskScores risk_assessment={risk_assessment} />
+          {activeTab === 'performance' && (
+            <TabPanel>
+              <h3 className="font-semibold text-xl text-gray-900 mb-6">Model Performance Analysis</h3>
+              <ModelPerformanceGraphs />
+            </TabPanel>
+          )}
 
-            {/* Confidence Scores */}
-            <ConfidenceScores
-              confidence_scores={risk_assessment.confidence_scores || {}}
-              overall_accuracy={risk_assessment.overall_accuracy || 0}
-            />
+          {activeTab === 'relevance' && test_cases.length > 0 && (
+            <TabPanel className="mb-0">
+              <TestRelevanceDisplay test_cases={test_cases} risk_assessment={risk_assessment} />
+            </TabPanel>
+          )}
 
-            {/* Analysis Coverage */}
-            <AnalysisCoverage analyzed_components={risk_assessment.analyzed_components || {}} />
-          </div>
-
-          {/* Model Performance Graphs */}
-          <div className="bg-white p-6 rounded-lg shadow mb-6">
-            <h3 className="font-semibold text-xl text-gray-900 mb-6">Model Performance Analysis</h3>
-            <ModelPerformanceGraphs />
-          </div>
-
-          {/* Test Cases */}
-          {test_cases && test_cases.length > 0 && (
-            <div className="space-y-4">
-              <h3 className="font-semibold text-lg">Security Test Cases</h3>
-              {test_cases.map((suite, index) => (
-                <TestSuite key={index} suite={suite} />
-              ))}
-            </div>
+          {activeTab === 'tests' && test_cases.length > 0 && (
+            <TabPanel>
+              <h3 className="font-semibold text-lg mb-4">Security Test Cases</h3>
+              <div className="space-y-4">
+                {test_cases.map((suite, index) => (
+                  <TestSuite key={index} suite={suite} risk_assessment={risk_assessment} />
+                ))}
+              </div>
+            </TabPanel>
           )}
         </div>
       </div>
     </div>
   );
 };
-
 export default ResultsDisplay;
