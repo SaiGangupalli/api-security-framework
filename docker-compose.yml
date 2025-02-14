@@ -1,0 +1,35 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - OPENAI_API_KEY=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
+      - PYTHONPATH=/app/src
+    ports:
+      - "8000:8000"
+    depends_on:
+      - elasticsearch
+    volumes:
+      - ./backend/src:/app/src
+      - ./models:/app/src/ml/models
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+
+volumes:
+  elasticsearch-data:
