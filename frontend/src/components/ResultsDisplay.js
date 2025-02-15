@@ -171,47 +171,201 @@ const AnalysisCoverage = ({ analyzed_components }) => (
   </div>
 );
 
-const assignRelevanceScores = (test_cases, risk_assessment) => {
-
-  if (!risk_assessment) {
-      console.warn('Risk assessment data is missing');
-      return test_cases.map(suite => ({
-        ...suite,
-        relevance_score: 0,
-        risk_score: 0
-      }));
-    }
-
-  // Map of test types to their corresponding risk types
+const calculateRelevanceScore = (suite, riskAssessment) => {
+  // Get corresponding risk score from risk assessment
   const riskMapping = {
     'Authentication Bypass': 'auth_bypass_risk',
-    'SQL Injection Test': 'sql_injection_risk',
-    'Cross-Site Scripting (XSS) Test': 'xss_risk',
-    'Rate Limiting Test': 'rate_limiting_risk',
-    'Data Exposure and Leakage': 'auth_bypass_risk', // Map similar tests
     'SQL Injection': 'sql_injection_risk',
+    'XSS': 'xss_risk',
+    'Rate Limiting': 'rate_limiting_risk',
     'Command Injection': 'command_injection_risk',
-    'Path Traversal': 'path_traversal_risk',
+    'Path Traversal': 'path_traversal_risk'
   };
 
+  const riskType = riskMapping[suite.type] || Object.entries(riskMapping)
+    .find(([key]) => suite.type.toLowerCase().includes(key.toLowerCase()))?.[1];
+
+  const riskScore = riskType ? riskAssessment[riskType] || 0 : 0;
+
+  // Calculate base score from risk (0-2 points)
+  const riskBasedScore = riskScore * 2;
+
+  // Priority based score (0-1 points)
+  const priorityScores = {
+    'Critical': 1,
+    'High': 0.7,
+    'Medium': 0.4,
+    'Low': 0.2
+  };
+
+  const priorityScore = suite.test_cases?.[0]?.priority ?
+    priorityScores[suite.test_cases[0].priority] || 0 : 0;
+
+  // Test completeness score (0-1 points)
+  const hasSteps = suite.test_cases?.[0]?.steps?.length > 0;
+  const hasExpectedResults = !!suite.test_cases?.[0]?.expected_results;
+  const hasRemediation = !!suite.test_cases?.[0]?.remediation;
+  const completenessScore = (
+    (hasSteps ? 0.4 : 0) +
+    (hasExpectedResults ? 0.3 : 0) +
+    (hasRemediation ? 0.3 : 0)
+  );
+
+  // Calculate final score (0-4 scale)
+  const finalScore = riskBasedScore + priorityScore + completenessScore;
+
+  return {
+    total: finalScore,
+    breakdown: {
+      riskBased: riskBasedScore,
+      priority: priorityScore,
+      completeness: completenessScore
+    },
+    components: {
+      hasSteps,
+      hasExpectedResults,
+      hasRemediation
+    }
+  };
+};
+
+const RelevanceScale = ({ score }) => {
+  const getColor = (score) => {
+    if (score >= 3) return 'bg-blue-600';
+    if (score >= 2) return 'bg-blue-500';
+    if (score >= 1) return 'bg-blue-400';
+    return 'bg-blue-300';
+  };
+
+  const getLabel = (score) => {
+    if (score >= 3) return 'High';
+    if (score >= 2) return 'Medium';
+    if (score >= 1) return 'Low';
+    return 'Minimal';
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className={`w-3 h-3 rounded-full ${getColor(score)}`} />
+      <span className="text-sm font-medium text-gray-700">
+        {getLabel(score)} Relevance ({score.toFixed(2)}/4.0)
+      </span>
+    </div>
+  );
+};
+
+const ScoreBreakdown = ({ scores, className = "" }) => {
+  if (!scores) return null;
+
+  return (
+    <div className={`p-3 bg-gray-50 rounded-lg text-sm ${className}`}>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="space-y-1">
+          <div className="flex justify-between">
+            <span className="text-gray-600">Risk-based Score:</span>
+            <span className="font-medium">{scores.riskBased.toFixed(2)}/2.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${(scores.riskBased / 2) * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-1">
+          <div className="flex justify-between">
+            <span className="text-gray-600">Priority Score:</span>
+            <span className="font-medium">{scores.priority.toFixed(2)}/1.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${scores.priority * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-1">
+          <div className="flex justify-between">
+            <span className="text-gray-600">Completeness Score:</span>
+            <span className="font-medium">{scores.completeness.toFixed(2)}/1.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${scores.completeness * 100}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const CompletenessIndicators = ({ details }) => {
+  if (!details) return null;
+
+  const indicators = [
+    { label: 'Test Steps', status: details.hasSteps },
+    { label: 'Expected Results', status: details.hasExpectedResults },
+    { label: 'Remediation', status: details.hasRemediation }
+  ];
+
+  return (
+    <div className="flex gap-4 mt-2">
+      {indicators.map(({ label, status }) => (
+        <div
+          key={label}
+          className={`px-2 py-1 rounded-full text-xs font-medium ${
+            status
+              ? 'bg-green-100 text-green-800'
+              : 'bg-gray-100 text-gray-600'
+          }`}
+        >
+          {status ? '✓' : '×'} {label}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const assignRelevanceScores = (test_cases, risk_assessment) => {
+  if (!risk_assessment) {
+    console.warn('Risk assessment data is missing');
+    return test_cases.map(suite => ({
+      ...suite,
+      relevance_score: 0,
+      risk_score: 0,
+      score_breakdown: {
+        riskBased: 0,
+        priority: 0,
+        completeness: 0
+      },
+      completeness_details: {
+        hasSteps: false,
+        hasExpectedResults: false,
+        hasRemediation: false
+      }
+    }));
+  }
+
   return test_cases.map(suite => {
-    // If it already has a relevance score, return as is
-    if (suite.relevance_score !== undefined && suite.risk_score !== undefined) {
+    // If it already has complete scoring details, return as is
+    if (suite.relevance_score !== undefined &&
+        suite.risk_score !== undefined &&
+        suite.score_breakdown !== undefined &&
+        suite.completeness_details !== undefined) {
       return suite;
     }
 
-    // Find corresponding risk score from risk assessment
-    const riskType = riskMapping[suite.type];
-    const riskScore = riskType ? risk_assessment[riskType] : 0;
-
-    // Calculate relevance score based on risk score and type
-    // Using a formula similar to the RAG system
-    const baseRelevance = riskScore * 3 + 1.5; // Scale to match RAG scores (typically 2.0-2.5)
+    // Calculate comprehensive scoring using calculateRelevanceScore
+    const scores = calculateRelevanceScore(suite, risk_assessment);
 
     return {
       ...suite,
-      relevance_score: baseRelevance,
-      risk_score: riskScore
+      relevance_score: scores.total,
+      risk_score: scores.breakdown.riskBased / 2, // Convert back to 0-1 scale
+      score_breakdown: scores.breakdown,
+      completeness_details: scores.components
     };
   });
 };
@@ -249,33 +403,62 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
   return (
     <div className="bg-white p-6 rounded-lg shadow-sm mb-6">
       <h3 className="text-xl font-bold text-gray-900 mb-4">Test Case Relevance Analysis</h3>
-      <div className="h-80">
+      <div className="h-96"> {/* Increased height to accommodate labels */}
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={relevanceData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+          <BarChart
+            data={relevanceData}
+            margin={{ top: 20, right: 30, left: 20, bottom: 120 }} // Increased bottom margin
+          >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis
               dataKey="name"
               angle={-45}
               textAnchor="end"
-              height={70}
+              height={100} // Increased height for labels
               interval={0}
-              tick={{fontSize: 12}}
+              tick={{
+                fontSize: 12,
+                fill: '#374151',
+                dx: -8 // Adjust label position horizontally
+              }}
             />
             <YAxis
               yAxisId="relevance"
               orientation="left"
-              label={{ value: 'Relevance Score', angle: -90, position: 'insideLeft' }}
+              label={{
+                value: 'Relevance Score',
+                angle: -90,
+                position: 'insideLeft',
+                style: { textAnchor: 'middle' }
+              }}
               domain={[0, maxRelevance]}
             />
             <YAxis
               yAxisId="risk"
               orientation="right"
-              label={{ value: 'Risk Score (%)', angle: 90, position: 'insideRight' }}
+              label={{
+                value: 'Risk Score (%)',
+                angle: 90,
+                position: 'insideRight',
+                style: { textAnchor: 'middle' }
+              }}
               domain={[0, 100]}
             />
             <Tooltip content={<CustomTooltip />} />
-            <Bar yAxisId="relevance" dataKey="relevance" name="Relevance Score" fill="#3b82f6" />
-            <Bar yAxisId="risk" dataKey="risk" name="Risk Score (%)" fill="#ef4444" />
+            <Bar
+              yAxisId="relevance"
+              dataKey="relevance"
+              name="Relevance Score"
+              fill="#3b82f6"
+              radius={[4, 4, 0, 0]} // Rounded corners on top
+            />
+            <Bar
+              yAxisId="risk"
+              dataKey="risk"
+              name="Risk Score (%)"
+              fill="#ef4444"
+              radius={[4, 4, 0, 0]} // Rounded corners on top
+            />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -286,7 +469,7 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
           {relevanceData.map((item) => (
             <div key={item.name} className="bg-gray-50 p-4 rounded-lg">
               <div className="flex justify-between items-center mb-2">
-                <span className="font-medium text-gray-700">{item.name}</span>
+                <span className="font-medium text-gray-700 break-words max-w-[60%]">{item.name}</span>
                 <div className="flex gap-4">
                   <span className="text-blue-600">{item.relevance.toFixed(2)}</span>
                   <span className="text-red-600">{item.risk.toFixed(1)}%</span>
@@ -343,63 +526,208 @@ const RelevanceIndicator = ({ score, riskScore }) => {
   );
 };
 
-const TestCase = ({ test }) => (
-  <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
-    <div className="flex flex-col gap-2">
-      <div className="flex justify-between items-start gap-4">
-        <h4 className="font-semibold text-lg text-blue-800 break-words flex-1">{test.name}</h4>
-        <span className={`shrink-0 px-3 py-1 rounded-full text-sm font-medium ${
-          test.priority === 'Critical' ? 'bg-red-100 text-red-800' :
-          test.priority === 'High' ? 'bg-orange-100 text-orange-800' :
-          'bg-yellow-100 text-yellow-800'
-        }`}>
-          {test.priority}
-        </span>
+const TestCase = ({ test, isRagGenerated = false }) => {
+  const [showDetails, setShowDetails] = useState(false);
+
+  // Ensure we have valid test scores
+  const relevanceScore = test.relevance_score || 0;
+  const riskScore = test.risk_score || 0;
+
+  // Calculate derived score breakdown if not provided
+  const scoreBreakdown = test.score_breakdown || {
+    riskBased: riskScore * 2, // Scale up to 0-2 range
+    priority: test.priority === 'Critical' ? 1.0 :
+             test.priority === 'High' ? 0.7 :
+             test.priority === 'Medium' ? 0.4 :
+             test.priority === 'Low' ? 0.2 : 0,
+    completeness: (test.steps?.length > 0 ? 0.4 : 0) +
+                 (test.expected_results ? 0.3 : 0) +
+                 (test.remediation ? 0.3 : 0)
+  };
+
+  // Calculate derived completeness details if not provided
+  const completenessDetails = test.completeness_details || {
+    hasSteps: test.steps?.length > 0,
+    hasExpectedResults: !!test.expected_results,
+    hasRemediation: !!test.remediation
+  };
+
+  const getRelevanceColor = (score) => {
+    if (score >= 3) return 'bg-blue-600';
+    if (score >= 2) return 'bg-blue-500';
+    if (score >= 1) return 'bg-blue-400';
+    return 'bg-blue-300';
+  };
+
+  const getRelevanceLabel = (score) => {
+    if (score >= 3) return 'High';
+    if (score >= 2) return 'Medium';
+    if (score >= 1) return 'Low';
+    return 'Minimal';
+  };
+
+  const ScoreBreakdown = () => (
+    <div className="p-4 bg-gray-50 rounded-lg mt-4">
+      <h6 className="font-medium text-gray-700 mb-3">Score Breakdown</h6>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Risk-based Score:</span>
+            <span className="text-sm font-medium">{scoreBreakdown.riskBased.toFixed(2)}/2.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${(scoreBreakdown.riskBased / 2) * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Priority Score:</span>
+            <span className="text-sm font-medium">{scoreBreakdown.priority.toFixed(2)}/1.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${scoreBreakdown.priority * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Completeness Score:</span>
+            <span className="text-sm font-medium">{scoreBreakdown.completeness.toFixed(2)}/1.0</span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${scoreBreakdown.completeness * 100}%` }}
+            />
+          </div>
+        </div>
       </div>
-      <RelevanceIndicator score={test.relevance_score || 0} riskScore={test.risk_score || 0} />
     </div>
+  );
 
-    <p className="text-gray-600 mt-2 break-words whitespace-pre-wrap">{test.description}</p>
-
-    {test.steps && (
-      <div className="mt-3">
-        <h5 className="font-medium text-gray-700">Steps:</h5>
-        <div className="bg-white rounded-lg p-4">
-          <ul className="list-disc pl-5 space-y-2">
-            {test.steps.map((step, idx) => (
-              <li key={idx} className="text-sm text-gray-600 break-words">
-                {step}
-              </li>
-            ))}
-          </ul>
+  const CompletenessIndicators = () => (
+    <div className="flex flex-wrap gap-3 mt-3">
+      {Object.entries(completenessDetails).map(([key, value]) => (
+        <div
+          key={key}
+          className={`px-3 py-1 rounded-full text-xs font-medium ${
+            value
+              ? 'bg-green-100 text-green-800'
+              : 'bg-gray-100 text-gray-600'
+          }`}
+        >
+          {value ? '✓' : '×'} {key.replace(/([A-Z])/g, ' $1')
+            .replace('has', '')
+            .trim()}
         </div>
-      </div>
-    )}
+      ))}
+    </div>
+  );
 
-    {test.expected_results && (
-      <div className="mt-3">
-        <h5 className="font-medium text-gray-700">Expected Results:</h5>
-        <div className="bg-white rounded-lg p-4">
-          <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
-            {test.expected_results}
-          </p>
+  return (
+    <div className="mb-4 p-4 bg-white rounded-lg border border-gray-200 hover:shadow-sm transition-shadow">
+      <div className="flex flex-col">
+        <div className="flex justify-between items-start">
+          <div className="flex-1">
+            <h4 className="font-semibold text-lg text-blue-800 break-words">{test.name}</h4>
+
+            {/* Priority and Score Indicators */}
+            <div className="flex flex-wrap gap-3 mt-2">
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                test.priority === 'Critical' ? 'bg-red-100 text-red-800' :
+                test.priority === 'High' ? 'bg-orange-100 text-orange-800' :
+                'bg-yellow-100 text-yellow-800'
+              }`}>
+                {test.priority}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${getRelevanceColor(relevanceScore)}`} />
+                <span className="text-sm text-gray-600">
+                  {getRelevanceLabel(relevanceScore)} Relevance ({relevanceScore.toFixed(2)}/4.0)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  riskScore > 0.7 ? 'bg-red-600' :
+                  riskScore > 0.4 ? 'bg-yellow-400' :
+                  'bg-green-400'
+                }`} />
+                <span className="text-sm text-gray-600">
+                  {(riskScore * 100).toFixed(1)}% risk
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-4"
+          >
+            {showDetails ? 'Hide Details' : 'Show Details'}
+          </button>
         </div>
-      </div>
-    )}
 
-    {test.remediation && (
-      <div className="mt-3">
-        <h5 className="font-medium text-gray-700">Remediation:</h5>
-        <div className="bg-white rounded-lg p-4">
-          <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
-            {test.remediation}
-          </p>
-        </div>
-      </div>
-    )}
-  </div>
-);
+        {/* Description */}
+        <p className="text-gray-600 mt-3 break-words whitespace-pre-wrap">
+          {test.description}
+        </p>
 
+        {/* Detailed Content */}
+        {showDetails && (
+          <div className="mt-4 space-y-4">
+            <ScoreBreakdown />
+            <CompletenessIndicators />
+
+            {/* Steps */}
+            {test.steps && test.steps.length > 0 && (
+              <div className="mt-4">
+                <h5 className="font-medium text-gray-700 mb-2">Steps:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <ul className="list-disc pl-5 space-y-2">
+                    {test.steps.map((step, idx) => (
+                      <li key={idx} className="text-sm text-gray-600 break-words">{step}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* Expected Results */}
+            {test.expected_results && (
+              <div className="mt-4">
+                <h5 className="font-medium text-gray-700 mb-2">Expected Results:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
+                    {test.expected_results}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Remediation */}
+            {test.remediation && (
+              <div className="mt-4">
+                <h5 className="font-medium text-gray-700 mb-2">Remediation:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
+                    {test.remediation}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const TestSuite = ({ suite, risk_assessment }) => {
   // Calculate relevance and risk scores if they don't exist
@@ -409,33 +737,51 @@ const TestSuite = ({ suite, risk_assessment }) => {
   // Extract scores from the suite level
   const relevanceScore = assignedSuite.relevance_score || 0;
   const riskScore = assignedSuite.risk_score || 0;
+  const scoreBreakdown = assignedSuite.score_breakdown;
+  const completenessDetails = assignedSuite.completeness_details;
 
   return (
-    <div className="mb-6 p-6 bg-white rounded-lg shadow-sm hover:shadow transition-shadow overflow-hidden">
-      <div className="flex justify-between items-start mb-4">
-        <div>
-          <h3 className="text-xl font-bold text-gray-900 break-words">{suite.type}</h3>
-          <p className="text-gray-600 mt-1 break-words whitespace-pre-wrap">{suite.description}</p>
+    <div className="mb-6 p-6 bg-white rounded-lg shadow-sm hover:shadow transition-shadow">
+      <div className="flex flex-col">
+        <div className="mb-4">
+          <div className="flex-1">
+            <h3 className="text-xl font-bold text-gray-900">{suite.type}</h3>
+            <div className="flex items-center gap-4 mt-2">
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  relevanceScore >= 3 ? 'bg-blue-600' :
+                  relevanceScore >= 2 ? 'bg-blue-500' :
+                  relevanceScore >= 1 ? 'bg-blue-400' :
+                  'bg-blue-300'
+                }`} />
+                <span className="text-sm text-gray-600">
+                  Overall Relevance: {relevanceScore.toFixed(2)}/4.0
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-        <RelevanceIndicator score={relevanceScore} riskScore={riskScore} />
-      </div>
 
-      <div className="mt-4 space-y-4">
-        {suite.test_cases?.map((test, idx) => (
-          <TestCase
-            key={idx}
-            test={{
-              ...test,
-              relevance_score: relevanceScore,
-              risk_score: riskScore
-            }}
-          />
-        ))}
+        <p className="text-gray-600 mb-4">{suite.description}</p>
+
+        <div className="space-y-4">
+          {suite.test_cases?.map((test, idx) => (
+            <TestCase
+              key={idx}
+              test={{
+                ...test,
+                relevance_score: relevanceScore,
+                risk_score: riskScore,
+                score_breakdown: scoreBreakdown,
+                completeness_details: completenessDetails
+              }}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );
 };
-
 
 const ModelPerformanceGraphs = () => {
   const [performanceData, setPerformanceData] = useState(null);
@@ -716,4 +1062,5 @@ const ResultsDisplay = ({ results, onReset }) => {
     </div>
   );
 };
+
 export default ResultsDisplay;
