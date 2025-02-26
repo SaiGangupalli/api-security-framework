@@ -15,7 +15,7 @@ from ml.model import SecurityModel
 from genai.test_generator import TestGenerator
 from scripts.setup_elasticsearch import ElasticsearchSetup
 from rag.enhanced_rag import EnhancedRAG
-
+from genai.api import router as genai_router
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(genai_router)
 
 logger = logging.getLogger(__name__)
 

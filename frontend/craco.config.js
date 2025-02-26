@@ -1,4 +1,4 @@
-const webpack = require('webpack');
+const path = require('path');
 
 module.exports = {
   webpack: {
@@ -12,6 +12,12 @@ module.exports = {
       webpackConfig.resolve.fallback = {
         ...webpackConfig.resolve.fallback,
         path: require.resolve("path-browserify")
+      };
+
+      // Add path aliases
+      webpackConfig.resolve.alias = {
+        ...webpackConfig.resolve.alias,
+        '@': path.resolve(__dirname, 'src')
       };
 
       return webpackConfig;
