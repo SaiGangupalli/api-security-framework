@@ -500,19 +500,49 @@ const RelevanceScoreCalculator = () => {
     };
   };
 
+  // In the getRiskScore function of your RelevanceScoreCalculator
   const getRiskScore = (test, riskAssessment) => {
     // Normalize test type and description for comparison
     const normalizedType = (test.type || '').toLowerCase();
     const normalizedDesc = (test.description || '').toLowerCase();
-    const combinedText = `${normalizedType} ${normalizedDesc}`;
+    const normalizedName = (test.name || '').toLowerCase();
+    const combinedText = `${normalizedType} ${normalizedDesc} ${normalizedName}`;
 
-    // Find matching risk type based on keywords
-    const matchedRisk = Object.entries(riskMapping).find(([key]) =>
+    // Find matching risk type based on keywords with broader matching
+    let matchedRisk = Object.entries(riskMapping).find(([key]) =>
       combinedText.includes(key)
     );
 
+    // If no match found and this is likely an Auth Bypass test
+    if (!matchedRisk &&
+        (combinedText.includes('auth') ||
+         combinedText.includes('bypass') ||
+         combinedText.includes('authentication'))) {
+      matchedRisk = ['auth', 'auth_bypass_risk'];
+    }
+
+    // If no match found and this is likely an SQLi test
+    if (!matchedRisk &&
+        (combinedText.includes('sql') ||
+         combinedText.includes('injection') ||
+         combinedText.includes('database'))) {
+      matchedRisk = ['sql', 'sql_injection_risk'];
+    }
+
+    // If still no match, assign default based on priority
+    if (!matchedRisk) {
+      const priority = test.priority?.toLowerCase() || 'medium';
+      let defaultRiskScore = 0.3; // Default medium risk
+
+      if (priority === 'critical') defaultRiskScore = 0.8;
+      else if (priority === 'high') defaultRiskScore = 0.6;
+      else if (priority === 'low') defaultRiskScore = 0.2;
+
+      return defaultRiskScore;
+    }
+
     const riskType = matchedRisk ? matchedRisk[1] : null;
-    const riskScore = riskType ? (riskAssessment[riskType] || 0) : 0;
+    const riskScore = riskType ? (riskAssessment[riskType] || 0.3) : 0.3; // Default to 0.3 if not found
 
     // Apply priority weighting
     const priorityWeight = priorityWeights[test.priority] || 1.0;
@@ -1100,7 +1130,7 @@ const TestScriptViewer = ({ script, relevanceScore = 0 }) => {
             </div>
             <span className="text-xs text-gray-400">Test Script</span>
           </div>
-          <pre className="p-4 overflow-x-auto font-mono text-sm">
+          <pre className="p-4 overflow-x-auto font-mono text-sm whitespace-pre-wrap">
             <code>{script.script}</code>
           </pre>
         </div>
@@ -1116,7 +1146,7 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [relevanceThreshold, setRelevanceThreshold] = useState(6.0);
+  const [relevanceThreshold, setRelevanceThreshold] = useState(8.0);
   const getThresholdLabel = (threshold) => {
     if (threshold >= 8.0) return "high";
     if (threshold >= 6.0) return "medium";
@@ -1199,19 +1229,44 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
       }
 
       // Enhance test cases with relevance information
-      const enhancedTestCases = relevantCases.map(testCase => ({
-        ...testCase,
-        metadata: {
+      const enhancedTestCases = relevantCases.map(testCase => {
+        // Flatten structure to make it easier for the backend to process
+        return {
+          name: testCase.name,
+          type: testCase.type,
+          description: testCase.description,
+          priority: testCase.priority,
+          steps: testCase.steps || [],
+          expected_results: testCase.expected_results || '',
+          remediation: testCase.remediation || '',
           relevance_score: testCase.relevance_score,
           risk_score: testCase.risk_score,
-          priority: testCase.priority,
-          type: testCase.type
-        }
-      }));
+          metadata: {
+            relevance_score: testCase.relevance_score,
+            risk_score: testCase.risk_score,
+            priority: testCase.priority,
+            type: testCase.type
+          }
+        };
+      });
 
-      // Log these to help debugging
-      console.log('Enhanced test cases for API:', enhancedTestCases.length);
-      console.log('API details URI:', api_details?.request?.uri);
+      // Prepare API details with the correct structure
+      const endpoint = api_details?.request?.uri || '';
+      const method = api_details?.method || api_details?.request?.method || 'POST';
+
+      // Create properly formatted API details object
+      const formattedApiDetails = {
+        method: method || "POST",
+        request: {
+          uri: endpoint,
+          method: method || "POST",
+          headers: api_details?.request?.headers || {},
+          body: api_details?.request?.body || {}
+        },
+        response: api_details?.response || {}
+      };
+
+      console.log('Formatted API details:', formattedApiDetails);
 
       const response = await fetch('http://localhost:8000/api/generate-scripts', {
         method: 'POST',
@@ -1220,7 +1275,8 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
         },
         body: JSON.stringify({
           endpoint: api_details?.request?.uri,
-          test_cases: enhancedTestCases
+          test_cases: enhancedTestCases,
+          api_details: formattedApiDetails
         })
       });
 
@@ -1244,18 +1300,91 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
     }
   };
 
+  const cleanScriptForExecution = (scriptContent) => {
+    // First, remove any leading text before the actual code
+    let cleanedScript = scriptContent;
+
+    const importIndex = scriptContent.indexOf('import ');
+    if (importIndex > 0) {
+      cleanedScript = scriptContent.substring(importIndex);
+    }
+
+    // Remove explanation sections
+    const explanationIndex = cleanedScript.indexOf('### Explanation');
+    if (explanationIndex > 0) {
+      cleanedScript = cleanedScript.substring(0, explanationIndex).trim();
+    }
+
+    // Remove any markdown code block syntax
+    cleanedScript = cleanedScript.replace(/```python\n/g, '');
+    cleanedScript = cleanedScript.replace(/```/g, '');
+
+    // Add runtime environment setup for better execution
+    const runtimeSetup = `
+  import asyncio
+  import aiohttp
+  import json
+  import logging
+
+  # Configure basic logging
+  logging.basicConfig(level=logging.INFO)
+  logger = logging.getLogger(__name__)
+
+  # Function to run the main test
+  async def run_test():
+      try:
+          results = {}
+  `;
+
+    const mainFunctionCall = `
+          return results
+      except Exception as e:
+          logger.error(f"Test execution error: {str(e)}")
+          return {"error": str(e)}
+
+  # Allow importing this module without running the test
+  if __name__ == "__main__":
+      asyncio.run(run_test())
+  `;
+
+    // Look for the main test function definition
+    const testFunctionMatch = cleanedScript.match(/async def test_[\w_]+\(/);
+
+    if (testFunctionMatch) {
+      // Extract the function name
+      const functionName = testFunctionMatch[0].replace('async def ', '').replace('(', '');
+
+      // Build the new script with proper structure
+      const newScript = `${runtimeSetup}${cleanedScript}${mainFunctionCall}`;
+      return newScript;
+    }
+
+    // If no async function found, wrap the entire code in a run_test function
+    return `${runtimeSetup}
+          # Main test logic
+          ${cleanedScript.replace(/^/gm, '        ')}
+  ${mainFunctionCall}`;
+  };
+
   const executeTests = async () => {
     setIsExecuting(true);
     setError(null);
 
     try {
+      // Clean the scripts before sending them
+      const cleanedScripts = testScripts.map(script => ({
+        ...script,
+        script: cleanScriptForExecution(script.script)
+      }));
+
       const response = await fetch('http://localhost:8000/api/execute-tests', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          scripts: testScripts
+          endpoint: api_details?.request?.uri || '',
+          test_cases: cleanedScripts
         })
       });
 
@@ -1372,6 +1501,7 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
 
 const ResultsDisplay = ({ results, onReset }) => {
   const [activeTab, setActiveTab] = useState('risk');
+  const [showApiDetails, setShowApiDetails] = useState(true);
 
   // First check if results exist
   if (!results) return null;
@@ -1416,10 +1546,19 @@ const ResultsDisplay = ({ results, onReset }) => {
 
       <div className="flex gap-6">
         {/* Left Column - API Details */}
-        <div className="w-2/5">
+        <div className="w-2/5" style={{ display: activeTab === 'automation' ? (showApiDetails ? 'block' : 'none') : 'block' }}>
           <div className="bg-white p-6 rounded-lg shadow sticky top-4">
-            <h3 className="font-semibold mb-4 text-xl">API Details</h3>
-
+            <div className="flex justify-between items-center mb-4">
+                <h3 className="font-semibold mb-4 text-xl">API Details</h3>
+                {activeTab === 'automation' && (
+                        <button
+                          onClick={() => setShowApiDetails(!showApiDetails)}
+                          className="text-blue-600 hover:text-blue-800 text-sm"
+                        >
+                          {showApiDetails ? 'Hide Details' : 'Show Details'}
+                        </button>
+                      )}
+            </div>
             {/* Elasticsearch Query Details */}
             <ElasticsearchDetails es_details={es_details} />
 
@@ -1471,7 +1610,7 @@ const ResultsDisplay = ({ results, onReset }) => {
         </div>
 
         {/* Right Column - Tabbed Content */}
-        <div className="w-3/5">
+        <div className={activeTab === 'automation' && !showApiDetails ? "w-full" : "w-3/5"}>
           {activeTab === 'risk' && (
             <TabPanel>
               <h3 className="font-semibold text-xl text-gray-900 mb-6">Risk Assessment</h3>

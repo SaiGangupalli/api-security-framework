@@ -11,7 +11,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     environment:
-      - OPENAI_API_KEY=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
+      - OPENAI_API_KEY=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
       - PYTHONPATH=/app/src
     ports:
       - "8000:8000"

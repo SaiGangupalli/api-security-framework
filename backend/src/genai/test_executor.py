@@ -21,31 +21,55 @@ class APITestExecutor:
                 'logging': logging
             }
 
-            # Execute the script
-            exec(script['script'], namespace)
-
-            # Run the main test function
-            if 'run_test' in namespace:
-                result = await namespace['run_test']()
-
+            # Execute the script in a try-except block
+            try:
+                exec(script['script'], namespace)
+            except SyntaxError as se:
                 return {
                     "test_name": script['test_name'],
                     "test_type": script['test_type'],
-                    "status": "completed",
-                    "result": result,
-                    "error": None
+                    "status": "failed",
+                    "error": f"Syntax error: {str(se)}"
                 }
-            else:
-                raise ValueError("No run_test function found in script")
+            except Exception as e:
+                return {
+                    "test_name": script['test_name'],
+                    "test_type": script['test_type'],
+                    "status": "failed",
+                    "error": f"Script error: {str(e)}"
+                }
 
+            # Run the main test function
+            if 'run_test' in namespace:
+                try:
+                    result = await namespace['run_test']()
+                    return {
+                        "test_name": script['test_name'],
+                        "test_type": script['test_type'],
+                        "status": "completed",
+                        "result": result,
+                        "error": None
+                    }
+                except Exception as e:
+                    return {
+                        "test_name": script['test_name'],
+                        "test_type": script['test_type'],
+                        "status": "failed",
+                        "error": f"Runtime error: {str(e)}"
+                    }
+            else:
+                return {
+                    "test_name": script['test_name'],
+                    "test_type": script['test_type'],
+                    "status": "failed",
+                    "error": "No run_test function found in script"
+                }
         except Exception as e:
-            self.logger.error(f"Error executing test script: {str(e)}")
             return {
                 "test_name": script['test_name'],
                 "test_type": script['test_type'],
                 "status": "failed",
-                "result": None,
-                "error": str(e)
+                "error": f"Execution error: {str(e)}"
             }
 
     async def execute_test_suite(self, scripts: List[Dict]) -> List[Dict]:
