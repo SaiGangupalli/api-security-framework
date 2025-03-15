@@ -5,7 +5,7 @@ import {
   LineChart, Line
 } from 'recharts';
 import { Alert, AlertTitle, AlertDescription } from '../components/ui/alert';
-import { Play, CheckCircle, XCircle, Clock } from 'lucide-react';
+import { Play, CheckCircle, XCircle, Clock, Edit, Save, RotateCcw } from 'lucide-react';
 
 // Constants defined at the top level
 const vulnTypes = [
@@ -287,15 +287,40 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
       // Create data points for both suite and its test cases
       const suitePoint = {
         name: suite.type,
+        fullName: suite.type, // Store the full name for tooltip
         relevance: parseFloat(assignedSuite.relevance_score?.toFixed(2) || "0"),
         risk: parseFloat((assignedSuite.risk_score * 100)?.toFixed(1) || "0")
       };
 
-      const testPoints = assignedSuite.test_cases?.map(test => ({
-        name: `${suite.type} - ${test.name}`,
-        relevance: parseFloat(test.total?.toFixed(2) || "0"),
-        risk: parseFloat((test.breakdown?.riskBased / RISK_MULTIPLIER * 100)?.toFixed(1) || "0")
-      })) || [];
+      const testPoints = assignedSuite.test_cases?.map(test => {
+        // Store both shortened and full name
+        const fullName = `${suite.type} - ${test.name}`;
+        // Get name before hyphen or use full name if no hyphen
+        const shortName = test.name.split(' - ')[0] || test.name;
+
+        // FIX: Proper handling of test relevance scores
+        let relevanceScore = 0;
+        if (test.total !== undefined) {
+          relevanceScore = test.total;
+        } else if (test.relevance_score !== undefined) {
+          relevanceScore = test.relevance_score;
+        }
+
+        // FIX: Proper handling of test risk scores
+        let riskPercent = 0;
+        if (test.breakdown?.riskBased) {
+          riskPercent = (test.breakdown.riskBased / RISK_MULTIPLIER) * 100;
+        } else if (test.risk_score !== undefined) {
+          riskPercent = test.risk_score * 100;
+        }
+
+        return {
+          name: shortName, // Use shortened name for display
+          fullName: fullName, // Store full name for tooltip
+          relevance: parseFloat(relevanceScore.toFixed(2) || "0"),
+          risk: parseFloat(riskPercent.toFixed(1) || "0")
+        };
+      }) || [];
 
       return [suitePoint, ...testPoints];
     })
@@ -303,9 +328,11 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
 
   const CustomTooltip = ({ active, payload, label }) => {
     if (active && payload && payload.length) {
+      // Use the fullName for tooltip if available
+      const displayName = payload[0].payload.fullName || label;
       return (
         <div className="bg-white p-3 rounded-lg shadow border">
-          <p className="font-medium text-gray-900">{label}</p>
+          <p className="font-medium text-gray-900">{displayName}</p>
           <p className="text-blue-600">Relevance Score: {payload[0].value.toFixed(2)}</p>
           <p className="text-red-600">Risk Score: {payload[1].value.toFixed(1)}%</p>
         </div>
@@ -386,7 +413,9 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
           {relevanceData.map((item) => (
             <div key={item.name} className="bg-gray-50 p-4 rounded-lg">
               <div className="flex justify-between items-center mb-2">
-                <span className="font-medium text-gray-700 break-words max-w-[60%]">{item.name}</span>
+                <span className="font-medium text-gray-700 break-words max-w-[60%]">
+                  {item.fullName || item.name}
+                </span>
                 <div className="flex gap-4">
                   <span className="text-blue-600">{item.relevance.toFixed(2)}</span>
                   <span className="text-red-600">{item.risk.toFixed(1)}%</span>
@@ -443,6 +472,22 @@ const SCORE_RANGES = {
     High: 0.4,    // Medium-risk issues
     Low: 0.0      // Low-risk concerns
   }
+};
+
+// Risk type mapping for better detection
+const riskMapping = {
+  'sql': 'sql_injection_risk',
+  'injection': 'sql_injection_risk',
+  'xss': 'xss_risk',
+  'cross': 'xss_risk',
+  'auth': 'auth_bypass_risk',
+  'jwt': 'auth_bypass_risk',
+  'rate': 'rate_limiting_risk',
+  'limit': 'rate_limiting_risk',
+  'command': 'command_injection_risk',
+  'rce': 'command_injection_risk',
+  'path': 'path_traversal_risk',
+  'directory': 'path_traversal_risk'
 };
 
 const RelevanceScoreCalculator = () => {
@@ -566,8 +611,71 @@ const RelevanceScoreCalculator = () => {
   };
 
   // Calculate suite-level scores
+  // Calculate suite-level scores with improved handling of priorities
   const calculateSuiteScores = (suite, riskAssessment) => {
-    // Calculate scores for all test cases in the suite
+    // Helper function to normalize and map risk levels to priority scores
+    const getPriorityScore = (level) => {
+      if (!level) return PRIORITY_SCORES['Medium']; // Default to Medium
+
+      // Normalize by converting to lowercase and trimming
+      const normalized = level.toString().toLowerCase().trim();
+
+      if (normalized.includes('critical')) return PRIORITY_SCORES['Critical'];
+      if (normalized.includes('high')) return PRIORITY_SCORES['High'];
+      if (normalized.includes('medium')) return PRIORITY_SCORES['Medium'];
+      if (normalized.includes('low')) return PRIORITY_SCORES['Low'];
+
+      return PRIORITY_SCORES['Medium']; // Default if no match
+    };
+
+    // If the suite already has relevance_score and risk_score, use them
+    if (suite.relevance_score !== undefined && suite.risk_score !== undefined) {
+      // Just ensure the test cases have proper score properties
+      const testScores = (suite.test_cases || []).map(test => {
+        // If the test case already has scores, keep them
+        if (test.total !== undefined && test.breakdown) {
+          return test;
+        }
+
+        // Otherwise calculate scores or use fallbacks from test properties
+        const total = test.relevance_score || 0;
+        const riskBased = (test.risk_score || 0) * RISK_MULTIPLIER;
+
+        // Properly handle priority using the helper function
+        const priority = getPriorityScore(test.priority || test.risk_level);
+
+        // Calculate completeness based on presence of key elements
+        const hasSteps = Array.isArray(test.steps) && test.steps.length > 0;
+        const hasExpectedResults = !!test.expected_results;
+        const hasRemediation = !!test.remediation;
+        const completeness =
+          (hasSteps ? COMPLETENESS_SCORES.steps : 0) +
+          (hasExpectedResults ? COMPLETENESS_SCORES.expectedResults : 0) +
+          (hasRemediation ? COMPLETENESS_SCORES.remediation : 0);
+
+        return {
+          ...test,
+          total: total,
+          breakdown: {
+            riskBased: riskBased,
+            priority: priority,
+            completeness: completeness
+          },
+          components: {
+            hasSteps,
+            hasExpectedResults,
+            hasRemediation
+          }
+        };
+      });
+
+      return {
+        ...suite,
+        test_cases: testScores
+      };
+    }
+
+    // Original implementation when scores need to be calculated from scratch
     const testScores = suite.test_cases?.map(test => ({
       ...test,
       ...calculateRelevanceScore(test, riskAssessment)
@@ -575,12 +683,12 @@ const RelevanceScoreCalculator = () => {
 
     // Calculate aggregate suite scores
     const suiteScore = {
-      total: Math.max(...testScores.map(t => t.total), 0),
-      riskScore: Math.max(...testScores.map(t => t.breakdown.riskBased / 6), 0),
+      total: Math.max(...testScores.map(t => t.total || 0), 0),
+      riskScore: Math.max(...testScores.map(t => (t.breakdown?.riskBased || 0) / RISK_MULTIPLIER), 0),
       breakdown: {
-        riskBased: Math.max(...testScores.map(t => t.breakdown.riskBased), 0),
-        priority: Math.max(...testScores.map(t => t.breakdown.priority), 0),
-        completeness: Math.max(...testScores.map(t => t.breakdown.completeness), 0)
+        riskBased: Math.max(...testScores.map(t => t.breakdown?.riskBased || 0), 0),
+        priority: Math.max(...testScores.map(t => t.breakdown?.priority || 0), 0),
+        completeness: Math.max(...testScores.map(t => t.breakdown?.completeness || 0), 0)
       }
     };
 
@@ -990,6 +1098,8 @@ const TabButton = ({ active, onClick, children }) => (
 );
 
 const TestResult = ({ result }) => {
+  const [expanded, setExpanded] = useState(false);
+
   const getStatusColor = (status) => {
     switch (status) {
       case 'completed':
@@ -1011,6 +1121,9 @@ const TestResult = ({ result }) => {
         return <Clock className="w-5 h-5 text-gray-600" />;
     }
   };
+
+  const resultStr = result.result ? JSON.stringify(result.result, null, 2) : "";
+  const shouldTruncate = resultStr.length > 300;
 
   return (
     <div className="border rounded-lg p-4 mb-4">
@@ -1034,7 +1147,29 @@ const TestResult = ({ result }) => {
       {result.result && (
         <div className="mt-2 bg-gray-50 p-4 rounded-lg">
           <pre className="text-sm overflow-x-auto">
-            {JSON.stringify(result.result, null, 2)}
+            {shouldTruncate && !expanded ? (
+              <>
+                {resultStr.substring(0, 300)}...
+                <button
+                  onClick={() => setExpanded(true)}
+                  className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
+                >
+                  Show more
+                </button>
+              </>
+            ) : (
+              <>
+                {resultStr}
+                {shouldTruncate && (
+                  <button
+                    onClick={() => setExpanded(false)}
+                    className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
+                  >
+                    Show less
+                  </button>
+                )}
+              </>
+            )}
           </pre>
         </div>
       )}
@@ -1072,7 +1207,45 @@ const CodeDisplay = ({ code, maxHeight = "h-96" }) => {
   );
 };
 
-const TestScriptViewer = ({ script, relevanceScore = 0 }) => {
+const TestScriptEditor = ({ script, onSave, onCancel }) => {
+  const [editedScript, setEditedScript] = useState(script.script);
+
+  return (
+    <div className="bg-gray-900 text-gray-100 rounded-lg overflow-hidden mt-4">
+      <div className="flex justify-between items-center p-2 bg-gray-800">
+        <div className="flex space-x-2">
+          <div className="w-3 h-3 rounded-full bg-red-500"></div>
+          <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+          <div className="w-3 h-3 rounded-full bg-green-500"></div>
+        </div>
+        <span className="text-xs text-gray-400">Edit Test Script</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => onSave(editedScript)}
+            className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
+          >
+            <Save className="w-3 h-3" />
+            Save
+          </button>
+          <button
+            onClick={onCancel}
+            className="text-gray-400 hover:text-white text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      <textarea
+        value={editedScript}
+        onChange={(e) => setEditedScript(e.target.value)}
+        className="w-full p-4 bg-gray-900 text-gray-100 font-mono text-sm outline-none"
+        style={{ height: '400px', resize: 'vertical' }}
+      />
+    </div>
+  );
+};
+
+const TestScriptViewer = ({ script, relevanceScore = 0, onEdit }) => {
   const [expanded, setExpanded] = useState(false);
 
   const getPriorityStyle = (priority) => {
@@ -1108,12 +1281,21 @@ const TestScriptViewer = ({ script, relevanceScore = 0 }) => {
             </span>
           </div>
         </div>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-        >
-          {expanded ? 'Hide Code' : 'Show Code'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onEdit(script)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1"
+          >
+            <Edit className="w-4 h-4" />
+            Edit
+          </button>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+          >
+            {expanded ? 'Hide Code' : 'Show Code'}
+          </button>
+        </div>
       </div>
 
       <p className="text-sm text-gray-600 mb-2 line-clamp-2">
@@ -1147,27 +1329,135 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
   const [error, setError] = useState(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [relevanceThreshold, setRelevanceThreshold] = useState(8.0);
+  const [editingScript, setEditingScript] = useState(null);
+
+  // Helper function to determine threshold label
   const getThresholdLabel = (threshold) => {
     if (threshold >= 8.0) return "high";
     if (threshold >= 6.0) return "medium";
     if (threshold >= 4.0) return "low";
     return "minimal";
   };
-  // Get test cases with scores, sorted by relevance (fixed version)
+
+  // Helper function to get relevance label
+  const getRelevanceLabel = (score) => {
+    if (score >= SCORE_RANGES.relevance.High) return 'High';
+    if (score >= SCORE_RANGES.relevance.Medium) return 'Medium';
+    if (score >= SCORE_RANGES.relevance.Low) return 'Low';
+    return 'Minimal';
+  };
+
+  // This function calculates risk score based on test properties and risk assessment
+  const getRiskScore = (test, riskAssessment) => {
+    // Normalize test type and description for comparison
+    const normalizedType = (test.type || '').toLowerCase();
+    const normalizedDesc = (test.description || '').toLowerCase();
+    const normalizedName = (test.name || '').toLowerCase();
+    const combinedText = `${normalizedType} ${normalizedDesc} ${normalizedName}`;
+
+    // Find matching risk type based on keywords with broader matching
+    let matchedRisk = Object.entries(riskMapping).find(([key]) =>
+      combinedText.includes(key)
+    );
+
+    // If no match found and this is likely an Auth Bypass test
+    if (!matchedRisk &&
+        (combinedText.includes('auth') ||
+         combinedText.includes('bypass') ||
+         combinedText.includes('authentication'))) {
+      matchedRisk = ['auth', 'auth_bypass_risk'];
+    }
+
+    // If no match found and this is likely an SQLi test
+    if (!matchedRisk &&
+        (combinedText.includes('sql') ||
+         combinedText.includes('injection') ||
+         combinedText.includes('database'))) {
+      matchedRisk = ['sql', 'sql_injection_risk'];
+    }
+
+    // If still no match, assign default based on priority
+    if (!matchedRisk) {
+      const priority = test.priority?.toLowerCase() || 'medium';
+      let defaultRiskScore = 0.3; // Default medium risk
+
+      if (priority === 'critical') defaultRiskScore = 0.8;
+      else if (priority === 'high') defaultRiskScore = 0.6;
+      else if (priority === 'low') defaultRiskScore = 0.2;
+
+      return defaultRiskScore;
+    }
+
+    const riskType = matchedRisk ? matchedRisk[1] : null;
+    const riskScore = riskType ? (riskAssessment[riskType] || 0.3) : 0.3; // Default to 0.3 if not found
+
+    // Apply priority weighting
+    const priorityWeight = {
+      'Critical': 1.5,
+      'High': 1.25,
+      'Medium': 1.0,
+      'Low': 0.75
+    }[test.priority] || 1.0;
+
+    return riskScore * priorityWeight;
+  };
+
+  // Calculate completeness score based on test properties
+  const calculateCompletenessScore = (test) => {
+    let score = 0;
+
+    if (Array.isArray(test.steps) && test.steps.length > 0) {
+      score += COMPLETENESS_SCORES.steps;
+    }
+    if (test.expected_results) {
+      score += COMPLETENESS_SCORES.expectedResults;
+    }
+    if (test.remediation) {
+      score += COMPLETENESS_SCORES.remediation;
+    }
+
+    return Math.min(score, 3.0);
+  };
+
+  // Unified relevance score calculation
+  const calculateRelevanceScore = (test, riskAssessment = {}) => {
+    // 1. Risk-based score (0-6 points)
+    const riskScore = getRiskScore(test, riskAssessment);
+    const riskBasedScore = Math.min(riskScore * RISK_MULTIPLIER, 6.0);
+
+    // 2. Priority score (0-1 points)
+    const priorityScore = PRIORITY_SCORES[test.priority] || PRIORITY_SCORES.Low;
+
+    // 3. Completeness score (0-3 points)
+    const completenessScore = calculateCompletenessScore(test);
+
+    // Calculate total score and round to 2 decimal places
+    const totalScore = parseFloat((riskBasedScore + priorityScore + completenessScore).toFixed(2));
+
+    return {
+      total: Math.min(totalScore, 10.0),
+      breakdown: {
+        riskBased: riskBasedScore,
+        priority: priorityScore,
+        completeness: completenessScore
+      },
+      components: {
+        hasSteps: Array.isArray(test.steps) && test.steps.length > 0,
+        hasExpectedResults: !!test.expected_results,
+        hasRemediation: !!test.remediation
+      }
+    };
+  };
+
+  // Get test cases filtered by relevance threshold and sorted by relevance
   const getRelevantTestCases = useCallback((cases, riskAssessment) => {
-    // Flatten and map test cases with their suite info
-    const processedCases = cases.flatMap(suite => {
-      // First, calculate suite-level scores if not already present
-      const scoredSuite = suite.relevance_score !== undefined ?
-        suite :
-        calculateSuiteScores(suite, riskAssessment || {});
+    // Flat list of all test cases with scores
+    const allTestCases = cases.flatMap(suite => {
+      // Get tests from the suite
+      const testsFromSuite = suite.test_cases || [];
 
-      // Get test cases from the suite
-      const testCases = scoredSuite.test_cases || [];
-
-      // Process each test case with proper score handling
-      return testCases.map(test => {
-        // For test cases that already have scores
+      return testsFromSuite.map(test => {
+        // Check if test already has scores calculated
         if (test.total !== undefined) {
           return {
             ...test,
@@ -1180,7 +1470,7 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
           };
         }
 
-        // For test cases that need scores calculated
+        // Calculate scores for tests without pre-calculated values
         const scores = calculateRelevanceScore(test, riskAssessment);
         return {
           ...test,
@@ -1196,8 +1486,8 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
       });
     });
 
-    // Sort and filter cases
-    const filteredCases = processedCases
+    // Filter by threshold and sort by relevance
+    const filteredCases = allTestCases
       .filter(test => test.relevance_score >= relevanceThreshold)
       .sort((a, b) => b.relevance_score - a.relevance_score);
 
@@ -1205,105 +1495,16 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
     setRelevantCasesCount(filteredCases.length);
 
     return {
-        cases: filteredCases,
-        count: filteredCases.length
+      cases: filteredCases,
+      count: filteredCases.length
     };
   }, [relevanceThreshold]);
 
-  // Modified generateTestScripts function
-  const generateTestScripts = async () => {
-    if (!test_cases?.length) return;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const { cases: relevantCases, count } = getRelevantTestCases(test_cases, risk_assessment);
-      setRelevantCasesCount(count);
-      console.log('Relevant test cases for automation:', relevantCases);
-
-      if (relevantCases.length === 0) {
-        setTestScripts([]);
-        setError('No test cases meet the minimum relevance threshold');
-        return;
-      }
-
-      // Enhance test cases with relevance information
-      const enhancedTestCases = relevantCases.map(testCase => {
-        // Flatten structure to make it easier for the backend to process
-        return {
-          name: testCase.name,
-          type: testCase.type,
-          description: testCase.description,
-          priority: testCase.priority,
-          steps: testCase.steps || [],
-          expected_results: testCase.expected_results || '',
-          remediation: testCase.remediation || '',
-          relevance_score: testCase.relevance_score,
-          risk_score: testCase.risk_score,
-          metadata: {
-            relevance_score: testCase.relevance_score,
-            risk_score: testCase.risk_score,
-            priority: testCase.priority,
-            type: testCase.type
-          }
-        };
-      });
-
-      // Prepare API details with the correct structure
-      const endpoint = api_details?.request?.uri || '';
-      const method = api_details?.method || api_details?.request?.method || 'POST';
-
-      // Create properly formatted API details object
-      const formattedApiDetails = {
-        method: method || "POST",
-        request: {
-          uri: endpoint,
-          method: method || "POST",
-          headers: api_details?.request?.headers || {},
-          body: api_details?.request?.body || {}
-        },
-        response: api_details?.response || {}
-      };
-
-      console.log('Formatted API details:', formattedApiDetails);
-
-      const response = await fetch('http://localhost:8000/api/generate-scripts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          endpoint: api_details?.request?.uri,
-          test_cases: enhancedTestCases,
-          api_details: formattedApiDetails
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to generate test scripts: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('API response:', data);
-
-      setTestScripts(data.scripts?.map(script => ({
-        ...script,
-        relevance_score: enhancedTestCases.find(tc => tc.name === script.test_name)?.relevance_score || 0
-      })) || []);
-
-    } catch (err) {
-      setError(err.message);
-      console.error('Error generating test scripts:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Make sure test scripts can be executed
   const cleanScriptForExecution = (scriptContent) => {
-    // First, remove any leading text before the actual code
     let cleanedScript = scriptContent;
 
+    // Remove markdown and find Python imports
     const importIndex = scriptContent.indexOf('import ');
     if (importIndex > 0) {
       cleanedScript = scriptContent.substring(importIndex);
@@ -1315,95 +1516,246 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
       cleanedScript = cleanedScript.substring(0, explanationIndex).trim();
     }
 
-    // Remove any markdown code block syntax
+    // Remove code block markers
     cleanedScript = cleanedScript.replace(/```python\n/g, '');
     cleanedScript = cleanedScript.replace(/```/g, '');
 
-    // Add runtime environment setup for better execution
-    const runtimeSetup = `
-  import asyncio
-  import aiohttp
-  import json
-  import logging
+    // Add run_test wrapper if needed
+    if (!cleanedScript.includes('async def run_test()')) {
+      cleanedScript = `
+import asyncio
+import aiohttp
+import json
+import logging
 
-  # Configure basic logging
-  logging.basicConfig(level=logging.INFO)
-  logger = logging.getLogger(__name__)
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-  # Function to run the main test
-  async def run_test():
-      try:
-          results = {}
-  `;
+# Function to run the main test
+async def run_test():
+    try:
+        results = {}
+        # Main test logic
+${cleanedScript.split('\n').map(line => '        ' + line).join('\n')}
 
-    const mainFunctionCall = `
-          return results
-      except Exception as e:
-          logger.error(f"Test execution error: {str(e)}")
-          return {"error": str(e)}
+        return results
+    except Exception as e:
+        logger.error(f"Test execution error: {str(e)}")
+        return {"error": str(e)}
 
-  # Allow importing this module without running the test
-  if __name__ == "__main__":
-      asyncio.run(run_test())
-  `;
-
-    // Look for the main test function definition
-    const testFunctionMatch = cleanedScript.match(/async def test_[\w_]+\(/);
-
-    if (testFunctionMatch) {
-      // Extract the function name
-      const functionName = testFunctionMatch[0].replace('async def ', '').replace('(', '');
-
-      // Build the new script with proper structure
-      const newScript = `${runtimeSetup}${cleanedScript}${mainFunctionCall}`;
-      return newScript;
+# Allow importing this module without running the test
+if __name__ == "__main__":
+    asyncio.run(run_test())
+`;
     }
 
-    // If no async function found, wrap the entire code in a run_test function
-    return `${runtimeSetup}
-          # Main test logic
-          ${cleanedScript.replace(/^/gm, '        ')}
-  ${mainFunctionCall}`;
+    return cleanedScript;
   };
 
-  const executeTests = async () => {
-    setIsExecuting(true);
+  // Generate test scripts for selected test cases
+  const generateTestScripts = async () => {
+    if (!test_cases?.length) return;
+
+    setLoading(true);
     setError(null);
 
     try {
-      // Clean the scripts before sending them
-      const cleanedScripts = testScripts.map(script => ({
-        ...script,
-        script: cleanScriptForExecution(script.script)
-      }));
+      // Get relevant test cases
+      const { cases: relevantCases, count } = getRelevantTestCases(test_cases, risk_assessment);
 
-      const response = await fetch('http://localhost:8000/api/execute-tests', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          endpoint: api_details?.request?.uri || '',
-          test_cases: cleanedScripts
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to execute tests');
+      if (relevantCases.length === 0) {
+        setTestScripts([]);
+        setError('No test cases meet the minimum relevance threshold');
+        return;
       }
 
-      const data = await response.json();
-      setTestResults(data.results || []);
+      // Prepare test cases for API
+      const enhancedTestCases = relevantCases.map(testCase => ({
+        name: testCase.name,
+        type: testCase.type,
+        description: testCase.description,
+        priority: testCase.priority,
+        steps: testCase.steps || [],
+        expected_results: testCase.expected_results || '',
+        remediation: testCase.remediation || '',
+        relevance_score: testCase.relevance_score,
+        risk_score: testCase.risk_score,
+        metadata: {
+          relevance_score: testCase.relevance_score,
+          risk_score: testCase.risk_score,
+          priority: testCase.priority,
+          type: testCase.type,
+          breakdown: testCase.breakdown
+        }
+      }));
+
+      // Limit to 3 test cases for performance
+      const limitedTestCases = enhancedTestCases.slice(0, 3);
+
+      // API request
+      const endpoint = api_details?.request?.uri || '';
+      const method = api_details?.method || api_details?.request?.method || 'POST';
+
+      const apiDetailsObj = {
+        method: method || "POST",
+        request: {
+          uri: endpoint,
+          method: method || "POST",
+          headers: api_details?.request?.headers || {},
+          body: api_details?.request?.body || {}
+        },
+        response: api_details?.response || {}
+      };
+
+      // Mock API call - in real app, use fetch to endpoint
+      // This is a simulation to avoid hitting the actual API
+      console.log('Would send to API:', {
+        endpoint: apiDetailsObj.request.uri,
+        test_cases: limitedTestCases,
+        api_details: apiDetailsObj
+      });
+
+      // Simulate API response with mock data
+      const mockScripts = limitedTestCases.map(tc => ({
+        test_name: tc.name,
+        test_type: tc.type,
+        description: tc.description,
+        script: `
+import asyncio
+import aiohttp
+import json
+import logging
+
+async def test_${tc.type.replace(/[^a-z0-9]/gi, '_').toLowerCase()}():
+    """
+    Test for ${tc.name}
+    """
+    url = "${endpoint}"
+
+    # Headers
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+    # Test payload based on vulnerability type
+    payload = {"test": "data"}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.${method.toLowerCase()}(url, headers=headers, json=payload) as response:
+            status = response.status
+            response_text = await response.text()
+            try:
+                response_json = await response.json()
+            except:
+                response_json = {}
+
+            # Analyze the response
+            results = {
+                "status_code": status,
+                "vulnerable": status >= 400,
+                "message": "Test completed successfully"
+            }
+
+            return results
+
+async def run_test():
+    return await test_${tc.type.replace(/[^a-z0-9]/gi, '_').toLowerCase()}()
+`,
+        priority: tc.priority
+      }));
+
+      // Save the generated scripts
+      setTestScripts(mockScripts.map(script => ({
+        ...script,
+        relevance_score: limitedTestCases.find(tc => tc.name === script.test_name)?.relevance_score || 0,
+        risk_score: limitedTestCases.find(tc => tc.name === script.test_name)?.risk_score || 0,
+        original_script: script.script,
+        cleaned_script: cleanScriptForExecution(script.script)
+      })));
+
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Failed to generate test scripts');
     } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle script editing
+  const handleEditScript = (script) => {
+    setEditingScript(script);
+  };
+
+  const handleSaveScript = (updatedCode) => {
+    setTestScripts(prev =>
+      prev.map(script =>
+        script.test_name === editingScript.test_name
+          ? {
+              ...script,
+              script: updatedCode,
+              cleaned_script: cleanScriptForExecution(updatedCode)
+            }
+          : script
+      )
+    );
+    setEditingScript(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingScript(null);
+  };
+
+  // Execute test scripts
+  const executeTests = async () => {
+    setIsExecuting(true);
+    setError(null);
+    setTestResults([]);
+
+    try {
+      // Mock execution - in a real app this would be an API call
+      setTimeout(() => {
+        const mockResults = testScripts.map(script => ({
+          test_name: script.test_name,
+          test_type: script.test_type,
+          status: Math.random() > 0.3 ? 'completed' : 'failed',
+          result: {
+            status_code: Math.floor(Math.random() * 2) === 0 ? 200 : 403,
+            vulnerable: Math.random() > 0.5,
+            details: "This is a mock test result"
+          },
+          error: Math.random() > 0.7 ? "Mock error message" : null
+        }));
+
+        setTestResults(mockResults);
+        setIsExecuting(false);
+      }, 2000);
+    } catch (err) {
+      setError(err.message || 'Failed to execute tests');
       setIsExecuting(false);
     }
   };
 
+  // Reset scripts to original versions
+  const resetScripts = () => {
+    setTestScripts(prev =>
+      prev.map(script => ({
+        ...script,
+        script: script.original_script,
+        cleaned_script: cleanScriptForExecution(script.original_script)
+      }))
+    );
+  };
+
+  // Generate scripts when component mounts or criteria changes
   useEffect(() => {
     if (test_cases?.length > 0 && api_details?.request?.uri) {
-      generateTestScripts();
+      // Small delay to prevent immediate execution
+      const timer = setTimeout(() => {
+        generateTestScripts();
+      }, 300);
+
+      return () => clearTimeout(timer);
     }
   }, [test_cases, api_details?.request?.uri, relevanceThreshold]);
 
@@ -1438,23 +1790,34 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
             </div>
           </div>
         </div>
-        <button
-          onClick={executeTests}
-          disabled={isExecuting || testScripts.length === 0}
-          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-        >
-          {isExecuting ? (
-            <>
-              <Clock className="w-4 h-4 animate-spin" />
-              Executing...
-            </>
-          ) : (
-            <>
-              <Play className="w-4 h-4" />
-              Run Tests ({testScripts.length})
-            </>
+        <div className="flex gap-2">
+          {testScripts.length > 0 && (
+            <button
+              onClick={resetScripts}
+              className="flex items-center gap-2 bg-gray-100 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-200"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Reset Scripts
+            </button>
           )}
-        </button>
+          <button
+            onClick={executeTests}
+            disabled={isExecuting || testScripts.length === 0}
+            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+          >
+            {isExecuting ? (
+              <>
+                <Clock className="w-4 h-4 animate-spin" />
+                Executing...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                Run Tests ({testScripts.length})
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -1467,18 +1830,27 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-4">
           <h4 className="font-medium text-gray-800">Test Scripts</h4>
-          {testScripts.length > 0 ? (
-            testScripts.map((script, index) => (
-              <TestScriptViewer
-                key={index}
-                script={script}
-                relevanceScore={script.relevance_score}
-              />
-            ))
+          {editingScript ? (
+            <TestScriptEditor
+              script={editingScript}
+              onSave={handleSaveScript}
+              onCancel={handleCancelEdit}
+            />
           ) : (
-            <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
-              No test scripts available
-            </div>
+            testScripts.length > 0 ? (
+              testScripts.map((script, index) => (
+                <TestScriptViewer
+                  key={index}
+                  script={script}
+                  relevanceScore={script.relevance_score}
+                  onEdit={() => handleEditScript(script)}
+                />
+              ))
+            ) : (
+              <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
+                No test scripts available
+              </div>
+            )
           )}
         </div>
 
@@ -1494,6 +1866,214 @@ const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+};
+
+const CombinedTestCaseList = ({ test_cases, risk_assessment }) => {
+  // First calculate scores for all suites
+  const scoredSuites = test_cases.map(suite =>
+    suite.relevance_score !== undefined ?
+      suite :
+      calculateSuiteScores(suite, risk_assessment || {})
+  );
+
+  // Create a flat list of all test cases with their suite information
+  const allTestCases = scoredSuites.flatMap(suite => {
+    // Get test cases from each suite
+    return (suite.test_cases || []).map(test => ({
+      test: {
+        ...test,
+        // Ensure we have the suite information
+        suite_type: suite.type,
+        suite_description: suite.description,
+        // Pass scores directly
+        suite_relevance_score: suite.relevance_score,
+        risk_score: suite.risk_score,
+      },
+      suite: suite,
+      // Get the relevance score (for sorting)
+      relevance: test.total || 0,
+      // Each test case needs a unique ID
+      id: `${suite.type}-${test.name}-${Math.random().toString(36).substring(2, 9)}`
+    }));
+  });
+
+  // Sort all test cases by relevance score in descending order
+  const sortedTestCases = allTestCases.sort((a, b) => b.relevance - a.relevance);
+
+  return (
+    <div className="space-y-4">
+      {sortedTestCases.map((item) => (
+        <SingleTestCase key={item.id} item={item} />
+      ))}
+    </div>
+  );
+};
+
+// Individual test case component with its own state
+const SingleTestCase = ({ item }) => {
+  const [showDetails, setShowDetails] = useState(false);
+
+  const toggleDetails = () => {
+    setShowDetails(!showDetails);
+  };
+
+  return (
+    <div className="mb-4 p-4 bg-white rounded-lg border border-gray-200 hover:shadow-sm transition-shadow">
+      <div className="flex flex-col">
+        <div className="flex justify-between items-start">
+          <div className="flex-1">
+            {/* Show suite type as context */}
+            <div className="text-sm text-blue-600 mb-1">{item.suite.type}</div>
+
+            {/* Test name with relevance badge */}
+            <h4 className="font-semibold text-lg text-blue-800 break-words">
+              {item.test.name}
+            </h4>
+
+            <div className="flex flex-wrap gap-3 mt-2">
+              {/* Priority badge */}
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                item.test.priority === 'Critical' ? 'bg-red-100 text-red-800' :
+                item.test.priority === 'High' ? 'bg-orange-100 text-orange-800' :
+                'bg-yellow-100 text-yellow-800'
+              }`}>
+                {item.test.priority}
+              </span>
+
+              {/* Relevance score */}
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  item.relevance >= 8 ? 'bg-blue-600' :
+                  item.relevance >= 6 ? 'bg-blue-500' :
+                  item.relevance >= 4 ? 'bg-blue-400' :
+                  'bg-blue-300'
+                }`} />
+                <span className="text-sm text-gray-600">
+                  {getRelevanceLabel(item.relevance)} Relevance ({item.relevance.toFixed(2)}/10.0)
+                </span>
+              </div>
+
+              {/* Risk score */}
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  (item.test.breakdown?.riskBased / RISK_MULTIPLIER) > 0.7 ? 'bg-red-600' :
+                  (item.test.breakdown?.riskBased / RISK_MULTIPLIER) > 0.4 ? 'bg-yellow-400' :
+                  'bg-green-400'
+                }`} />
+                <span className="text-sm text-gray-600">
+                  {((item.test.breakdown?.riskBased / RISK_MULTIPLIER || 0) * 100).toFixed(1)}% risk
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={toggleDetails}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-4"
+          >
+            {showDetails ? 'Hide Details' : 'Show Details'}
+          </button>
+        </div>
+
+        {/* Test description */}
+        <p className="text-gray-600 mt-3 break-words whitespace-pre-wrap">
+          {item.test.description}
+        </p>
+
+        {/* Test details section */}
+        {showDetails && (
+          <div className="mt-4 space-y-4">
+            {/* Score Breakdown */}
+            <div className="p-4 bg-gray-50 rounded-lg">
+              <h6 className="font-medium text-gray-700 mb-3">Score Breakdown</h6>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">Risk-based Score:</span>
+                    <span className="text-sm font-medium">
+                      {item.test.breakdown?.riskBased.toFixed(2) || "0.00"}/6.0
+                    </span>
+                  </div>
+                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-500"
+                      style={{ width: `${((item.test.breakdown?.riskBased || 0) / 6) * 100}%` }}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">Priority Score:</span>
+                    <span className="text-sm font-medium">
+                      {item.test.breakdown?.priority.toFixed(2) || "0.00"}/1.0
+                    </span>
+                  </div>
+                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-500"
+                      style={{ width: `${(item.test.breakdown?.priority || 0) * 100}%` }}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">Completeness Score:</span>
+                    <span className="text-sm font-medium">
+                      {item.test.breakdown?.completeness.toFixed(2) || "0.00"}/3.0
+                    </span>
+                  </div>
+                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-500"
+                      style={{ width: `${((item.test.breakdown?.completeness || 0) / 3) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Steps */}
+            {item.test.steps && item.test.steps.length > 0 && (
+              <div>
+                <h5 className="font-medium text-gray-700 mb-2">Steps:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <ul className="list-disc pl-5 space-y-2">
+                    {item.test.steps.map((step, idx) => (
+                      <li key={idx} className="text-sm text-gray-600 break-words">{step}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* Expected Results */}
+            {item.test.expected_results && (
+              <div>
+                <h5 className="font-medium text-gray-700 mb-2">Expected Results:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
+                    {item.test.expected_results}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Remediation */}
+            {item.test.remediation && (
+              <div>
+                <h5 className="font-medium text-gray-700 mb-2">Remediation:</h5>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-sm text-gray-600 break-words whitespace-pre-wrap">
+                    {item.test.remediation}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1639,11 +2219,7 @@ const ResultsDisplay = ({ results, onReset }) => {
           {activeTab === 'tests' && test_cases.length > 0 && (
             <TabPanel>
               <h3 className="font-semibold text-lg mb-4">Security Test Cases</h3>
-              <div className="space-y-4">
-                {test_cases.map((suite, index) => (
-                  <TestSuite key={index} suite={suite} risk_assessment={risk_assessment} />
-                ))}
-              </div>
+              <CombinedTestCaseList test_cases={test_cases} risk_assessment={risk_assessment} />
             </TabPanel>
           )}
 

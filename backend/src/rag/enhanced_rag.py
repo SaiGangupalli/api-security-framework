@@ -236,6 +236,15 @@ class EnhancedRAG:
 
             # Process results with risk-aware scoring
             scored_patterns = []
+
+            # Define priority scores mapping in Python
+            PRIORITY_SCORES = {
+                'Critical': 1.0,
+                'High': 0.7,
+                'Medium': 0.4,
+                'Low': 0.2
+            }
+
             for hit in result["hits"]["hits"]:
                 pattern = hit["_source"]
                 es_score = hit["_score"]
@@ -257,8 +266,7 @@ class EnhancedRAG:
                             risk_score = risk_info['score']
                             break
 
-                    # Calculating combined score with risk weighting
-                    # Risk score heavily influences final ranking
+                    # Calculate combined score with risk weighting
                     combined_score = (
                             similarity * 0.3 +  # 30% vector similarity
                             es_score * 0.3 +    # 30% elasticsearch score
@@ -285,7 +293,7 @@ class EnhancedRAG:
                             "Test edge cases"
                         ])
 
-                    # Add context-aware steps
+                    # Add context-aware steps based on context boosts conditions
                     for context, boost_info in context_boosts.items():
                         if boost_info["condition"]:
                             if context == "auth":
@@ -297,6 +305,22 @@ class EnhancedRAG:
                             elif context == "cors":
                                 steps.append("Test CORS configuration")
 
+                    # Calculate completeness score components
+                    has_steps = len(steps) > 0
+                    has_expected_results = bool(pattern.get("expected_response"))
+                    has_remediation = bool(pattern.get("remediation"))
+
+                    completeness_score = (
+                            (1.2 if has_steps else 0) +
+                            (0.9 if has_expected_results else 0) +
+                            (0.9 if has_remediation else 0)
+                    )
+
+                    # Map risk level to priority score
+                    risk_level = pattern.get("risk_level", "Medium")
+                    priority_score = PRIORITY_SCORES.get(risk_level, PRIORITY_SCORES["Medium"])
+
+                    # FIXED: Add explicit scores and properly formatted breakdown
                     scored_patterns.append({
                         "type": pattern["vulnerability_type"],
                         "description": pattern["test_pattern"],
@@ -308,7 +332,19 @@ class EnhancedRAG:
                             "priority": pattern["risk_level"],
                             "steps": steps,
                             "expected_results": pattern["expected_response"],
-                            "remediation": pattern["remediation"]
+                            "remediation": pattern["remediation"],
+                            # Add total and breakdown for the frontend
+                            "total": combined_score,
+                            "breakdown": {
+                                "riskBased": risk_score * 6.0,  # Scale to match the expected scale
+                                "priority": priority_score,
+                                "completeness": completeness_score
+                            },
+                            "components": {
+                                "hasSteps": has_steps,
+                                "hasExpectedResults": has_expected_results,
+                                "hasRemediation": has_remediation
+                            }
                         }]
                     })
 
