@@ -226,7 +226,7 @@ async def analyze_endpoint(request: APIRequest):
             "query_timestamp": datetime.now().isoformat()
         }
 
-        # ML risk assessment
+        # Performing ML risk assessment
         try:
             # risk_assessment = security_model.perform_ml_risk_assessment(api_details)
             risk_assessment = security_model.analyze_risks(api_details)
@@ -238,27 +238,27 @@ async def analyze_endpoint(request: APIRequest):
                 content={"error": f"ML prediction failed: {str(e)}"}
             )
 
-        # Get security patterns
+        # Getting security patterns
         rag_patterns = await rag.get_rag_patterns(api_details, risk_assessment)
 
-        # Generate OpenAI test cases
+        # Generating OpenAI test cases
         try:
             openai_test_cases = await openai.generate_openai_test_cases(api_details, risk_assessment)
         except Exception as e:
             logger.error(f"OpenAI generation error: {str(e)}")
             openai_test_cases = []
 
-        # Combine test cases
+        # Combining test cases
         combined_test_cases = enhance_test_cases(rag_patterns, openai_test_cases)
 
         response_data = {
-            "api_details": api_details,         # API information from Elasticsearch
-            "es_details": es_details,           # Elasticsearch query details
-            "risk_assessment": risk_assessment, # ML model predictions
-            "test_cases": combined_test_cases   # Combined test cases from RAG and OpenAI
+            "api_details": api_details,         # Information about the API from Elasticsearch
+            "es_details": es_details,           # Elasticsearch query performance metrics
+            "risk_assessment": risk_assessment, # ML model predictions for various vulnerability types
+            "test_cases": combined_test_cases   # Combined security test cases from multiple sources RAG and OpenAI
         }
 
-        # Log the complete response for debugging
+        # Logging the complete response for debugging
         logger.debug(f"Complete response data: {json.dumps(response_data, indent=2)}")
 
         return response_data

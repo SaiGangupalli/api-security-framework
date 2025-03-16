@@ -946,7 +946,7 @@ class SecurityModelTrainer:
         """Train all models with cross-validation and performance tracking"""
         logger.info("Starting model training process...")
 
-        # Generate training data
+        # Generating training data
         logger.info("Generating training data...")
         X, y_dict = self.generate_training_data(n_samples=10000)
 

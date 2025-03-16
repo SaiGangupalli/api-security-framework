@@ -22,7 +22,7 @@ async def generate_test_scripts(request: TestScriptRequest):
     try:
         script_generator = APITestScriptGenerator()
 
-        # Create more complete default api_details if not provided
+        # Creating complete default api_details if not provided
         if not request.api_details:
             api_details = {
                 "method": "POST",  # Default to POST
@@ -34,7 +34,7 @@ async def generate_test_scripts(request: TestScriptRequest):
             }
         else:
             api_details = request.api_details
-            # Ensure method exists at the top level
+            # Ensuring method exists at the top level
             if not api_details.get('method'):
                 api_details["method"] = api_details.get('request', {}).get('method', 'POST')
 

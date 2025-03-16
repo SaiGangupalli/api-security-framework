@@ -333,7 +333,7 @@ class ElasticsearchSetup:
                     "user_agent": random.choice(self.user_agents),
                     "geo_location": self._generate_geo_location()
                 },
-                "request": self._generate_request(scenario, is_attack),
+                "request": self._generate_request(scenario, is_attack, endpoint),
                 "response": self._generate_response(is_attack),
                 "security_context": self._generate_security_context(
                     scenario, security_event, is_attack
@@ -343,7 +343,7 @@ class ElasticsearchSetup:
 
             self.es.index(index=self.api_logs_index, document=doc)
 
-    def _generate_request(self, scenario, is_attack):
+    def _generate_request(self, scenario, is_attack, endpoint=None):
         """Generating request data based on scenario"""
         headers = {
             "Content-Type": "application/json",
@@ -370,11 +370,14 @@ class ElasticsearchSetup:
                 params["file"] = payload
             body = {"input": payload}
 
+        # Use the provided endpoint instead of choosing randomly
+        uri_endpoint = endpoint if endpoint else random.choice(self.sample_endpoints)
+
         return {
             "headers": headers,
             "params": params,
             "body": body,
-            "uri": f"{random.choice(self.sample_endpoints)}?{urlencode(params)}"
+            "uri": f"{uri_endpoint}?{urlencode(params)}"
         }
 
     def _generate_response(self, is_attack):
@@ -1580,6 +1583,276 @@ class ElasticsearchSetup:
                 "payload": "Attempt to forge machine credentials",
                 "expected_response": "Robust M2M authentication",
                 "remediation": "Implement mutual TLS and strong credential validation",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "HTTP Method Override Bypass",
+                "test_pattern": "Test authentication enforcement across HTTP methods",
+                "payload": "Change POST to GET with X-HTTP-Method-Override: GET",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Enforce authentication consistently across all HTTP methods",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "JWT Signature Verification Bypass",
+                "test_pattern": "Test JWT signature verification process",
+                "payload": "Modified JWT payload with unchanged signature",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Implement proper signature verification and use strong keys",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authentication Header Case Sensitivity",
+                "test_pattern": "Test case sensitivity in authentication headers",
+                "payload": "Modify header case: 'authorization' instead of 'Authorization'",
+                "expected_response": "Consistent header handling regardless of case",
+                "remediation": "Implement case-insensitive header processing",
+                "risk_level": "Medium"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Session Fixation",
+                "test_pattern": "Test if pre-authentication session IDs are changed after login",
+                "payload": "Set session ID before authentication and check if it changes after login",
+                "expected_response": "New session ID assigned after authentication",
+                "remediation": "Generate new session ID after successful authentication",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Broken Multi-Step Authentication",
+                "test_pattern": "Test multi-step authentication flow integrity",
+                "payload": "Skip intermediate steps in multi-step authentication process",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Validate each step and maintain secure authentication state",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authorization Header Stripping",
+                "test_pattern": "Test proxy handling of authentication headers",
+                "payload": "Use headers like X-Original-Authorization to bypass front-end security",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Only accept standard authentication headers and validate at all layers",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "JWT Empty Signature Bypass",
+                "test_pattern": "Test handling of JWT tokens with empty signatures",
+                "payload": "Modify JWT structure with empty signature part",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Validate JWT structure and require valid signatures",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Timing-Based Authentication Bypass",
+                "test_pattern": "Test for timing leaks in authentication",
+                "payload": "Measure response times with different credentials",
+                "expected_response": "Constant-time responses regardless of input",
+                "remediation": "Implement constant-time comparison for credentials",
+                "risk_level": "Medium"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "API Key in URL Bypass",
+                "test_pattern": "Test for authentication using URL parameters instead of headers",
+                "payload": "Move API key from Authorization header to URL parameter",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Only accept authentication in headers, not in URL parameters",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Bearer Prefix Bypass",
+                "test_pattern": "Test token acceptance without required prefix",
+                "payload": "Send JWT token without 'Bearer' prefix",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Strictly validate token format including required prefixes",
+                "risk_level": "Medium"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Cross-Service Authentication Bypass",
+                "test_pattern": "Test authentication across different services",
+                "payload": "Use authentication token from one service to access another",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Implement service-specific token validation and audience checks",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authentication Race Condition",
+                "test_pattern": "Test concurrent authentication requests",
+                "payload": "Submit multiple authentication requests simultaneously",
+                "expected_response": "Proper handling of concurrent requests",
+                "remediation": "Implement thread-safe authentication processes",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "JWT Algorithm Confusion",
+                "test_pattern": "Test for algorithm confusion in JWT verification",
+                "payload": "Change JWT from RS256 to HS256 using public key as secret",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Explicitly specify and verify the algorithm used",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Missing Authentication for Critical Function",
+                "test_pattern": "Test critical function access without authentication",
+                "payload": "Access critical endpoint without authentication",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Ensure all critical functions require proper authentication",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Cookie Authentication Bypass",
+                "test_pattern": "Test for cookie-based authentication weaknesses",
+                "payload": "Modify or forge authentication cookies",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Use signed and encrypted cookies with proper validation",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authentication Cache Poisoning",
+                "test_pattern": "Test for cached authentication results",
+                "payload": "Cache poisoning attack targeting authentication results",
+                "expected_response": "Authentication decisions not cached",
+                "remediation": "Don't cache authentication results or implement secure cache validation",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authentication Logic Bypass",
+                "test_pattern": "Test for logical flaws in authentication flow",
+                "payload": "Manipulate authentication flow sequence",
+                "expected_response": "Robust authentication regardless of request order",
+                "remediation": "Implement proper authentication state management",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Referer Header Authentication Bypass",
+                "test_pattern": "Test for Referer header-based authentication",
+                "payload": "Spoof Referer header to bypass authentication",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Never rely on Referer header for authentication decisions",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "IP-Based Authentication Bypass",
+                "test_pattern": "Test for IP-based authentication weaknesses",
+                "payload": "Spoof source IP using X-Forwarded-For header",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Use secure methods for IP validation or avoid IP-based authentication",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Forced Browsing Authentication Bypass",
+                "test_pattern": "Test direct access to protected pages",
+                "payload": "Directly browse to protected endpoints bypassing login flow",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Enforce authentication checks on all protected resources",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Expired JWT with Modified Expiry Claim",
+                "test_pattern": "Test JWT expiry validation",
+                "payload": "Modify expiry claim in expired JWT token",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Implement server-side validation of token expiry and signature verification",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "CORS Authentication Bypass",
+                "test_pattern": "Test for authentication weaknesses in CORS implementation",
+                "payload": "Exploit misconfigured CORS to perform cross-origin requests",
+                "expected_response": "CORS headers properly restrict access",
+                "remediation": "Implement proper CORS policy with appropriate origin restrictions",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "JWT Kid Header Injection",
+                "test_pattern": "Test for key ID (kid) parameter injection in JWT",
+                "payload": "Manipulate kid header parameter to point to a different key",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Validate and sanitize the kid parameter before using it",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Subdomain Authentication Bypass",
+                "test_pattern": "Test authentication across different subdomains",
+                "payload": "Use authentication from one subdomain on another",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Implement proper domain/subdomain isolation for authentication",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "CAPTCHA Bypass Authentication",
+                "test_pattern": "Test CAPTCHA implementation in authentication",
+                "payload": "Reuse or forge CAPTCHA tokens",
+                "expected_response": "Rejected authentication attempt",
+                "remediation": "Implement server-side validation and single-use CAPTCHA tokens",
+                "risk_level": "Medium"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Username Enumeration",
+                "test_pattern": "Test for username enumeration during authentication",
+                "payload": "Submit requests with different usernames and analyze responses",
+                "expected_response": "Generic error message regardless of username validity",
+                "remediation": "Use consistent error messages and response times",
+                "risk_level": "Medium"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Request Method Authentication Bypass",
+                "test_pattern": "Test authentication across different HTTP methods",
+                "payload": "Change request method from POST to GET for authenticated endpoints",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Enforce authentication consistently across all HTTP methods",
+                "risk_level": "High"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "External Authentication Bypass",
+                "test_pattern": "Test for vulnerabilities in external authentication integrations",
+                "payload": "Manipulate authentication data from external identity providers",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Validate all authentication data received from external sources",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "HMAC Signature Bypass",
+                "test_pattern": "Test HMAC signature validation",
+                "payload": "Modify request data without updating HMAC signature",
+                "expected_response": "401 Unauthorized",
+                "remediation": "Verify HMAC signatures against all relevant request data",
+                "risk_level": "Critical"
+            },
+            {
+                "category": "Authentication",
+                "vulnerability_type": "Authentication Downgrade Attack",
+                "test_pattern": "Test for authentication method downgrading",
+                "payload": "Force downgrade to weaker authentication mechanism",
+                "expected_response": "Enforcement of strong authentication methods",
+                "remediation": "Prevent authentication downgrades and enforce minimum security requirements",
                 "risk_level": "High"
             }
         ]

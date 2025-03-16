@@ -7,8 +7,8 @@ import {
 import { Alert, AlertTitle, AlertDescription } from '../components/ui/alert';
 import { Play, CheckCircle, XCircle, Clock, Edit, Save, RotateCcw } from 'lucide-react';
 
-// Constants defined at the top level
-const vulnTypes = [
+// Constants
+const VULNERABILITY_TYPES = [
   'sql_injection',
   'xss',
   'auth_bypass',
@@ -17,7 +17,7 @@ const vulnTypes = [
   'path_traversal'
 ];
 
-const vulnDisplayNames = {
+const VULNERABILITY_DISPLAY_NAMES = {
   'sql_injection': 'SQL Injection',
   'xss': 'XSS',
   'auth_bypass': 'Auth Bypass',
@@ -26,6 +26,74 @@ const vulnDisplayNames = {
   'path_traversal': 'Path Traversal'
 };
 
+// Scoring constants
+const RISK_MULTIPLIER = 6; // Maximum risk-based score
+
+const PRIORITY_SCORES = {
+  'Critical': 1.0,
+  'High': 0.7,
+  'Medium': 0.4,
+  'Low': 0.2
+};
+
+const COMPLETENESS_SCORES = {
+  steps: 1.2,
+  expectedResults: 0.9,
+  remediation: 0.9
+};
+
+// Score ranges for labels
+const SCORE_RANGES = {
+  relevance: {
+    High: 8.0,
+    Medium: 6.0,
+    Low: 4.0,
+    Minimal: 0.0
+  },
+  risk: {
+    Critical: 0.7,
+    High: 0.4,
+    Low: 0.0
+  }
+};
+
+// Risk type mapping
+const RISK_MAPPING = {
+  'sql': 'sql_injection_risk',
+  'injection': 'sql_injection_risk',
+  'xss': 'xss_risk',
+  'cross': 'xss_risk',
+  'auth': 'auth_bypass_risk',
+  'jwt': 'auth_bypass_risk',
+  'rate': 'rate_limiting_risk',
+  'limit': 'rate_limiting_risk',
+  'command': 'command_injection_risk',
+  'rce': 'command_injection_risk',
+  'path': 'path_traversal_risk',
+  'directory': 'path_traversal_risk'
+};
+
+// Utility functions
+const getRelevanceLabel = (score) => {
+  if (score >= SCORE_RANGES.relevance.High) return 'High';
+  if (score >= SCORE_RANGES.relevance.Medium) return 'Medium';
+  if (score >= SCORE_RANGES.relevance.Low) return 'Low';
+  return 'Minimal';
+};
+
+const getRiskLabel = (score) => {
+  if (score >= SCORE_RANGES.risk.Critical) return 'Critical';
+  if (score >= SCORE_RANGES.risk.High) return 'High';
+  return 'Low';
+};
+
+// Helper for parsing numeric values
+const toNumber = (value, defaultValue = 0) => {
+  const num = Number(value);
+  return isNaN(num) ? defaultValue : num;
+};
+
+// Utility Components
 const JsonDisplay = ({ data }) => {
   const formatData = (value) => {
     if (value === null || value === undefined) return 'null';
@@ -70,6 +138,197 @@ const ElasticsearchDetails = ({ es_details }) => {
   );
 };
 
+// Test Score Calculation Logic
+const ScoreCalculator = {
+  // Calculate risk score based on test properties and risk assessment
+  getRiskScore: (test, riskAssessment = {}) => {
+    // Normalize test type and description for comparison
+    const normalizedType = (test.type || '').toLowerCase();
+    const normalizedDesc = (test.description || '').toLowerCase();
+    const normalizedName = (test.name || '').toLowerCase();
+    const combinedText = `${normalizedType} ${normalizedDesc} ${normalizedName}`;
+
+    // Find matching risk type based on keywords
+    let matchedRisk = Object.entries(RISK_MAPPING).find(([key]) =>
+      combinedText.includes(key)
+    );
+
+    // If no match found, check for common patterns
+    if (!matchedRisk) {
+      if (combinedText.includes('auth') || combinedText.includes('bypass') ||
+          combinedText.includes('authentication')) {
+        matchedRisk = ['auth', 'auth_bypass_risk'];
+      } else if (combinedText.includes('sql') || combinedText.includes('injection') ||
+                combinedText.includes('database')) {
+        matchedRisk = ['sql', 'sql_injection_risk'];
+      }
+    }
+
+    // If still no match, assign default based on priority
+    if (!matchedRisk) {
+      const priority = test.priority?.toLowerCase() || 'medium';
+      let defaultRiskScore = 0.3; // Default medium risk
+
+      if (priority === 'critical') defaultRiskScore = 0.8;
+      else if (priority === 'high') defaultRiskScore = 0.6;
+      else if (priority === 'low') defaultRiskScore = 0.2;
+
+      return defaultRiskScore;
+    }
+
+    const riskType = matchedRisk[1];
+    const riskScore = riskAssessment[riskType] || 0.3; // Default to 0.3 if not found
+
+    // Apply priority weighting
+    const priorityWeight = {
+      'Critical': 1.5,
+      'High': 1.25,
+      'Medium': 1.0,
+      'Low': 0.75
+    }[test.priority] || 1.0;
+
+    return riskScore * priorityWeight;
+  },
+
+  // Calculate completeness score
+  calculateCompletenessScore: (test) => {
+    let score = 0;
+
+    if (Array.isArray(test.steps) && test.steps.length > 0) {
+      score += COMPLETENESS_SCORES.steps;
+    }
+    if (test.expected_results) {
+      score += COMPLETENESS_SCORES.expectedResults;
+    }
+    if (test.remediation) {
+      score += COMPLETENESS_SCORES.remediation;
+    }
+
+    return Math.min(score, 3.0);
+  },
+
+  // Calculate overall relevance score
+  calculateRelevanceScore: (test, riskAssessment = {}) => {
+    // 1. Risk-based score (0-6 points)
+    const riskScore = ScoreCalculator.getRiskScore(test, riskAssessment);
+    const riskBasedScore = Math.min(riskScore * RISK_MULTIPLIER, 6.0);
+
+    // 2. Priority score (0-1 points)
+    const priorityScore = PRIORITY_SCORES[test.priority] || PRIORITY_SCORES.Low;
+
+    // 3. Completeness score (0-3 points)
+    const completenessScore = ScoreCalculator.calculateCompletenessScore(test);
+
+    // Calculate total score and round to 2 decimal places
+    const totalScore = parseFloat((riskBasedScore + priorityScore + completenessScore).toFixed(2));
+
+    return {
+      total: Math.min(totalScore, 10.0),
+      breakdown: {
+        riskBased: riskBasedScore,
+        priority: priorityScore,
+        completeness: completenessScore
+      },
+      components: {
+        hasSteps: Array.isArray(test.steps) && test.steps.length > 0,
+        hasExpectedResults: !!test.expected_results,
+        hasRemediation: !!test.remediation
+      }
+    };
+  },
+
+  // Helper function to normalize and map risk levels to priority scores
+  getPriorityScore: (level) => {
+    if (!level) return PRIORITY_SCORES['Medium']; // Default to Medium
+
+    // Normalize by converting to lowercase and trimming
+    const normalized = level.toString().toLowerCase().trim();
+
+    if (normalized.includes('critical')) return PRIORITY_SCORES['Critical'];
+    if (normalized.includes('high')) return PRIORITY_SCORES['High'];
+    if (normalized.includes('medium')) return PRIORITY_SCORES['Medium'];
+    if (normalized.includes('low')) return PRIORITY_SCORES['Low'];
+
+    return PRIORITY_SCORES['Medium']; // Default if no match
+  },
+
+  // Calculate suite-level scores
+  calculateSuiteScores: (suite, riskAssessment) => {
+    // If the suite already has relevance_score and risk_score, use them
+    if (suite.relevance_score !== undefined && suite.risk_score !== undefined) {
+      // Just ensure the test cases have proper score properties
+      const testScores = (suite.test_cases || []).map(test => {
+        // If the test case already has scores, keep them
+        if (test.total !== undefined && test.breakdown) {
+          return test;
+        }
+
+        // Otherwise calculate scores or use fallbacks from test properties
+        const total = test.relevance_score || 0;
+        const riskBased = (test.risk_score || 0) * RISK_MULTIPLIER;
+
+        // Properly handle priority using the helper function
+        const priority = ScoreCalculator.getPriorityScore(test.priority || test.risk_level);
+
+        // Calculate completeness based on presence of key elements
+        const hasSteps = Array.isArray(test.steps) && test.steps.length > 0;
+        const hasExpectedResults = !!test.expected_results;
+        const hasRemediation = !!test.remediation;
+        const completeness =
+          (hasSteps ? COMPLETENESS_SCORES.steps : 0) +
+          (hasExpectedResults ? COMPLETENESS_SCORES.expectedResults : 0) +
+          (hasRemediation ? COMPLETENESS_SCORES.remediation : 0);
+
+        return {
+          ...test,
+          total: total,
+          breakdown: {
+            riskBased: riskBased,
+            priority: priority,
+            completeness: completeness
+          },
+          components: {
+            hasSteps,
+            hasExpectedResults,
+            hasRemediation
+          }
+        };
+      });
+
+      return {
+        ...suite,
+        test_cases: testScores
+      };
+    }
+
+    // Calculate from scratch
+    const testScores = suite.test_cases?.map(test => ({
+      ...test,
+      ...ScoreCalculator.calculateRelevanceScore(test, riskAssessment)
+    })) || [];
+
+    // Calculate aggregate suite scores
+    const suiteScore = {
+      total: Math.max(...testScores.map(t => t.total || 0), 0),
+      riskScore: Math.max(...testScores.map(t => (t.breakdown?.riskBased || 0) / RISK_MULTIPLIER), 0),
+      breakdown: {
+        riskBased: Math.max(...testScores.map(t => t.breakdown?.riskBased || 0), 0),
+        priority: Math.max(...testScores.map(t => t.breakdown?.priority || 0), 0),
+        completeness: Math.max(...testScores.map(t => t.breakdown?.completeness || 0), 0)
+      }
+    };
+
+    return {
+      ...suite,
+      relevance_score: suiteScore.total,
+      risk_score: suiteScore.riskScore,
+      score_breakdown: suiteScore.breakdown,
+      test_cases: testScores
+    };
+  }
+};
+
+// Core Components
 const RiskScores = ({ risk_assessment }) => {
   const getRiskColor = (score) => {
     if (score > 0.7) return 'bg-red-600';
@@ -173,11 +432,6 @@ const AnalysisCoverage = ({ analyzed_components }) => (
   </div>
 );
 
-const toNumber = (value, defaultValue = 0) => {
-  const num = Number(value);
-  return isNaN(num) ? defaultValue : num;
-};
-
 const RelevanceScale = ({ score }) => {
   const getColor = (score) => {
     if (score >= 8) return 'bg-blue-600';     // High relevance
@@ -241,7 +495,7 @@ const ScoreBreakdown = ({ scores, className = "" }) => {
           <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
             <div
               className="h-full bg-blue-500 transition-all duration-500"
-              style={{ width: `${scores.completeness * 100}%` }}
+              style={{ width: `${(scores.completeness / 3) * 100}%` }}
             />
           </div>
         </div>
@@ -282,7 +536,7 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
   const relevanceData = test_cases
     .flatMap(suite => {
       // Calculate suite-level scores consistently
-      const assignedSuite = calculateSuiteScores(suite, risk_assessment);
+      const assignedSuite = ScoreCalculator.calculateSuiteScores(suite, risk_assessment);
 
       // Create data points for both suite and its test cases
       const suitePoint = {
@@ -298,7 +552,7 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
         // Get name before hyphen or use full name if no hyphen
         const shortName = test.name.split(' - ')[0] || test.name;
 
-        // FIX: Proper handling of test relevance scores
+        // Handle test relevance scores
         let relevanceScore = 0;
         if (test.total !== undefined) {
           relevanceScore = test.total;
@@ -306,7 +560,7 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
           relevanceScore = test.relevance_score;
         }
 
-        // FIX: Proper handling of test risk scores
+        // Handle test risk scores
         let riskPercent = 0;
         if (test.breakdown?.riskBased) {
           riskPercent = (test.breakdown.riskBased / RISK_MULTIPLIER) * 100;
@@ -443,294 +697,12 @@ const TestRelevanceDisplay = ({ test_cases, risk_assessment }) => {
   );
 };
 
-// Constants for scoring
-const RISK_MULTIPLIER = 6; // Maximum risk-based score
-
-const PRIORITY_SCORES = {
-  'Critical': 1.0,  // High impact vulnerabilities
-  'High': 0.7,     // Significant vulnerabilities
-  'Medium': 0.4,   // Moderate concerns
-  'Low': 0.2       // Minor issues
-};
-
-const COMPLETENESS_SCORES = {
-  steps: 1.2,           // Test steps more heavily weighted
-  expectedResults: 0.9, // Expected results validation
-  remediation: 0.9      // Remediation guidance
-};
-
-// Score ranges for labels and classifications
-const SCORE_RANGES = {
-  relevance: {
-    High: 8.0,     // Critical + comprehensive tests
-    Medium: 6.0,   // Important security tests
-    Low: 4.0,      // Basic security checks
-    Minimal: 0.0   // Limited value tests
-  },
-  risk: {
-    Critical: 0.7, // High-risk vulnerabilities
-    High: 0.4,    // Medium-risk issues
-    Low: 0.0      // Low-risk concerns
-  }
-};
-
-// Risk type mapping for better detection
-const riskMapping = {
-  'sql': 'sql_injection_risk',
-  'injection': 'sql_injection_risk',
-  'xss': 'xss_risk',
-  'cross': 'xss_risk',
-  'auth': 'auth_bypass_risk',
-  'jwt': 'auth_bypass_risk',
-  'rate': 'rate_limiting_risk',
-  'limit': 'rate_limiting_risk',
-  'command': 'command_injection_risk',
-  'rce': 'command_injection_risk',
-  'path': 'path_traversal_risk',
-  'directory': 'path_traversal_risk'
-};
-
-const RelevanceScoreCalculator = () => {
-  // Risk type mapping for better detection
-  const riskMapping = {
-    'sql': 'sql_injection_risk',
-    'injection': 'sql_injection_risk',
-    'xss': 'xss_risk',
-    'cross': 'xss_risk',
-    'auth': 'auth_bypass_risk',
-    'jwt': 'auth_bypass_risk',
-    'rate': 'rate_limiting_risk',
-    'limit': 'rate_limiting_risk',
-    'command': 'command_injection_risk',
-    'rce': 'command_injection_risk',
-    'path': 'path_traversal_risk',
-    'directory': 'path_traversal_risk'
-  };
-
-  // Priority weights for risk scoring
-  const priorityWeights = {
-    'Critical': 1.5,
-    'High': 1.25,
-    'Medium': 1.0,
-    'Low': 0.75
-  };
-
-  // Core scoring function used consistently throughout the application
-  const calculateRelevanceScore = (test, riskAssessment = {}) => {
-    // 1. Risk-based score (0-6 points)
-    const riskScore = getRiskScore(test, riskAssessment);
-    const riskBasedScore = Math.min(riskScore * 6, 6.0);
-
-    // 2. Priority score (0-1 points)
-    const priorityScore = PRIORITY_SCORES[test.priority] || PRIORITY_SCORES.Low;
-
-    // 3. Completeness score (0-3 points)
-    const completenessScore = calculateCompletenessScore(test);
-
-    // Calculate total score and round to 2 decimal places
-    const totalScore = parseFloat((riskBasedScore + priorityScore + completenessScore).toFixed(2));
-
-    return {
-      total: Math.min(totalScore, 10.0),
-      breakdown: {
-        riskBased: riskBasedScore,
-        priority: priorityScore,
-        completeness: completenessScore
-      },
-      components: {
-        hasSteps: Array.isArray(test.steps) && test.steps.length > 0,
-        hasExpectedResults: !!test.expected_results,
-        hasRemediation: !!test.remediation
-      }
-    };
-  };
-
-  // In the getRiskScore function of your RelevanceScoreCalculator
-  const getRiskScore = (test, riskAssessment) => {
-    // Normalize test type and description for comparison
-    const normalizedType = (test.type || '').toLowerCase();
-    const normalizedDesc = (test.description || '').toLowerCase();
-    const normalizedName = (test.name || '').toLowerCase();
-    const combinedText = `${normalizedType} ${normalizedDesc} ${normalizedName}`;
-
-    // Find matching risk type based on keywords with broader matching
-    let matchedRisk = Object.entries(riskMapping).find(([key]) =>
-      combinedText.includes(key)
-    );
-
-    // If no match found and this is likely an Auth Bypass test
-    if (!matchedRisk &&
-        (combinedText.includes('auth') ||
-         combinedText.includes('bypass') ||
-         combinedText.includes('authentication'))) {
-      matchedRisk = ['auth', 'auth_bypass_risk'];
-    }
-
-    // If no match found and this is likely an SQLi test
-    if (!matchedRisk &&
-        (combinedText.includes('sql') ||
-         combinedText.includes('injection') ||
-         combinedText.includes('database'))) {
-      matchedRisk = ['sql', 'sql_injection_risk'];
-    }
-
-    // If still no match, assign default based on priority
-    if (!matchedRisk) {
-      const priority = test.priority?.toLowerCase() || 'medium';
-      let defaultRiskScore = 0.3; // Default medium risk
-
-      if (priority === 'critical') defaultRiskScore = 0.8;
-      else if (priority === 'high') defaultRiskScore = 0.6;
-      else if (priority === 'low') defaultRiskScore = 0.2;
-
-      return defaultRiskScore;
-    }
-
-    const riskType = matchedRisk ? matchedRisk[1] : null;
-    const riskScore = riskType ? (riskAssessment[riskType] || 0.3) : 0.3; // Default to 0.3 if not found
-
-    // Apply priority weighting
-    const priorityWeight = priorityWeights[test.priority] || 1.0;
-    return riskScore * priorityWeight;
-  };
-
-  const calculateCompletenessScore = (test) => {
-    let score = 0;
-
-    if (Array.isArray(test.steps) && test.steps.length > 0) {
-      score += COMPLETENESS_SCORES.steps;
-    }
-    if (test.expected_results) {
-      score += COMPLETENESS_SCORES.expectedResults;
-    }
-    if (test.remediation) {
-      score += COMPLETENESS_SCORES.remediation;
-    }
-
-    return Math.min(score, 3.0);
-  };
-
-  // Calculate suite-level scores
-  // Calculate suite-level scores with improved handling of priorities
-  const calculateSuiteScores = (suite, riskAssessment) => {
-    // Helper function to normalize and map risk levels to priority scores
-    const getPriorityScore = (level) => {
-      if (!level) return PRIORITY_SCORES['Medium']; // Default to Medium
-
-      // Normalize by converting to lowercase and trimming
-      const normalized = level.toString().toLowerCase().trim();
-
-      if (normalized.includes('critical')) return PRIORITY_SCORES['Critical'];
-      if (normalized.includes('high')) return PRIORITY_SCORES['High'];
-      if (normalized.includes('medium')) return PRIORITY_SCORES['Medium'];
-      if (normalized.includes('low')) return PRIORITY_SCORES['Low'];
-
-      return PRIORITY_SCORES['Medium']; // Default if no match
-    };
-
-    // If the suite already has relevance_score and risk_score, use them
-    if (suite.relevance_score !== undefined && suite.risk_score !== undefined) {
-      // Just ensure the test cases have proper score properties
-      const testScores = (suite.test_cases || []).map(test => {
-        // If the test case already has scores, keep them
-        if (test.total !== undefined && test.breakdown) {
-          return test;
-        }
-
-        // Otherwise calculate scores or use fallbacks from test properties
-        const total = test.relevance_score || 0;
-        const riskBased = (test.risk_score || 0) * RISK_MULTIPLIER;
-
-        // Properly handle priority using the helper function
-        const priority = getPriorityScore(test.priority || test.risk_level);
-
-        // Calculate completeness based on presence of key elements
-        const hasSteps = Array.isArray(test.steps) && test.steps.length > 0;
-        const hasExpectedResults = !!test.expected_results;
-        const hasRemediation = !!test.remediation;
-        const completeness =
-          (hasSteps ? COMPLETENESS_SCORES.steps : 0) +
-          (hasExpectedResults ? COMPLETENESS_SCORES.expectedResults : 0) +
-          (hasRemediation ? COMPLETENESS_SCORES.remediation : 0);
-
-        return {
-          ...test,
-          total: total,
-          breakdown: {
-            riskBased: riskBased,
-            priority: priority,
-            completeness: completeness
-          },
-          components: {
-            hasSteps,
-            hasExpectedResults,
-            hasRemediation
-          }
-        };
-      });
-
-      return {
-        ...suite,
-        test_cases: testScores
-      };
-    }
-
-    // Original implementation when scores need to be calculated from scratch
-    const testScores = suite.test_cases?.map(test => ({
-      ...test,
-      ...calculateRelevanceScore(test, riskAssessment)
-    })) || [];
-
-    // Calculate aggregate suite scores
-    const suiteScore = {
-      total: Math.max(...testScores.map(t => t.total || 0), 0),
-      riskScore: Math.max(...testScores.map(t => (t.breakdown?.riskBased || 0) / RISK_MULTIPLIER), 0),
-      breakdown: {
-        riskBased: Math.max(...testScores.map(t => t.breakdown?.riskBased || 0), 0),
-        priority: Math.max(...testScores.map(t => t.breakdown?.priority || 0), 0),
-        completeness: Math.max(...testScores.map(t => t.breakdown?.completeness || 0), 0)
-      }
-    };
-
-    return {
-      ...suite,
-      relevance_score: suiteScore.total,
-      risk_score: suiteScore.riskScore,
-      score_breakdown: suiteScore.breakdown,
-      test_cases: testScores
-    };
-  };
-
-  return {
-    calculateRelevanceScore,
-    calculateSuiteScores,
-    getRelevanceLabel: (score) => {
-      if (score >= SCORE_RANGES.relevance.High) return 'High';
-      if (score >= SCORE_RANGES.relevance.Medium) return 'Medium';
-      if (score >= SCORE_RANGES.relevance.Low) return 'Low';
-      return 'Minimal';
-    },
-    getRiskLabel: (score) => {
-      if (score >= SCORE_RANGES.risk.Critical) return 'Critical';
-      if (score >= SCORE_RANGES.risk.High) return 'High';
-      return 'Low';
-    }
-  };
-};
-
-const {
-  calculateRelevanceScore,
-  calculateSuiteScores,
-  getRelevanceLabel,
-  getRiskLabel
-} = RelevanceScoreCalculator();
-
 const TestCase = ({ test, risk_assessment }) => {
   const [showDetails, setShowDetails] = useState(true);
 
   // Use the provided relevance score or calculate a new one
   const scoreDetails = test.total !== undefined ? test :
-    calculateRelevanceScore(test, risk_assessment || {});
+    ScoreCalculator.calculateRelevanceScore(test, risk_assessment || {});
 
   const getRelevanceColor = (score) => {
     if (score >= 4) return 'bg-blue-600';
@@ -740,53 +712,53 @@ const TestCase = ({ test, risk_assessment }) => {
   };
 
   const TestScoreBreakdown = () => (
-      <div className="p-4 bg-gray-50 rounded-lg mt-4">
-        <h6 className="font-medium text-gray-700 mb-3">Score Breakdown</h6>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Risk-based Score:</span>
-              <span className="text-sm font-medium">
-                {scoreDetails.breakdown.riskBased.toFixed(2)}/6.0
-              </span>
-            </div>
-            <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 transition-all duration-500"
-                style={{ width: `${(scoreDetails.breakdown.riskBased / 6) * 100}%` }}
-              />
-            </div>
+    <div className="p-4 bg-gray-50 rounded-lg mt-4">
+      <h6 className="font-medium text-gray-700 mb-3">Score Breakdown</h6>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Risk-based Score:</span>
+            <span className="text-sm font-medium">
+              {scoreDetails.breakdown.riskBased.toFixed(2)}/6.0
+            </span>
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Priority Score:</span>
-              <span className="text-sm font-medium">
-                {scoreDetails.breakdown.priority.toFixed(2)}/1.0
-              </span>
-            </div>
-            <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 transition-all duration-500"
-                style={{ width: `${scoreDetails.breakdown.priority * 100}%` }}
-              />
-            </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${(scoreDetails.breakdown.riskBased / 6) * 100}%` }}
+            />
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Completeness Score:</span>
-              <span className="text-sm font-medium">
-                {scoreDetails.breakdown.completeness.toFixed(2)}/3.0
-              </span>
-            </div>
-            <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 transition-all duration-500"
-                style={{ width: `${(scoreDetails.breakdown.completeness / 3) * 100}%` }}
-              />
-            </div>
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Priority Score:</span>
+            <span className="text-sm font-medium">
+              {scoreDetails.breakdown.priority.toFixed(2)}/1.0
+            </span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${scoreDetails.breakdown.priority * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-gray-600">Completeness Score:</span>
+            <span className="text-sm font-medium">
+              {scoreDetails.breakdown.completeness.toFixed(2)}/3.0
+            </span>
+          </div>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${(scoreDetails.breakdown.completeness / 3) * 100}%` }}
+            />
           </div>
         </div>
       </div>
+    </div>
   );
 
   return (
@@ -883,8 +855,8 @@ const TestCase = ({ test, risk_assessment }) => {
 };
 
 const TestSuite = ({ suite, risk_assessment }) => {
-  // Use the suite-level score calculation from RelevanceScoreCalculator
-  const assignedSuite = calculateSuiteScores(suite, risk_assessment || {});
+  // Use the suite-level score calculation from Score Calculator
+  const assignedSuite = ScoreCalculator.calculateSuiteScores(suite, risk_assessment || {});
 
   // Extract scores from the suite level
   const relevanceScore = assignedSuite.relevance_score || 0;
@@ -951,932 +923,12 @@ const TestSuite = ({ suite, risk_assessment }) => {
   );
 };
 
-const ModelPerformanceGraphs = () => {
-  const [performanceData, setPerformanceData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const fetchPerformanceData = async () => {
-      try {
-        const response = await fetch('http://localhost:8000/api/model-performance');
-        if (!response.ok) {
-          throw new Error('Failed to fetch performance data');
-        }
-        const data = await response.json();
-        if (data.status === 'success') {
-          // Transform the data for visualization
-          const transformedData = Object.entries(data.data).reduce((acc, [vuln, models]) => {
-            acc[vuln] = {
-              'Random Forest': models.random_forest || {},
-              'Gradient Boosting': models.gradient_boosting || {},
-              'Neural Network': models.neural_network || {},
-              'SVM': models.svm || {}
-            };
-            return acc;
-          }, {});
-          setPerformanceData(transformedData);
-        } else {
-          throw new Error(data.message || 'Failed to get performance data');
-        }
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchPerformanceData();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center p-8">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="p-4 bg-red-50 text-red-700 rounded-lg">
-        Error loading performance data: {error}
-      </div>
-    );
-  }
-
-  if (!performanceData) return null;
-
-  // Transform data for F1 score comparison
-  const f1ScoreData = Object.entries(performanceData).map(([vuln, models]) => ({
-    name: vulnDisplayNames[vuln] || vuln,
-    'Random Forest': models['Random Forest'].f1,
-    'Gradient Boosting': models['Gradient Boosting'].f1,
-    'Neural Network': models['Neural Network'].f1,
-    'SVM': models['SVM'].f1
-  }));
-
-  // Transform data for training time comparison
-  const trainingTimeData = Object.entries(performanceData).map(([vuln, models]) => ({
-    name: vulnDisplayNames[vuln] || vuln,
-    'Random Forest': models['Random Forest'].training_time,
-    'Gradient Boosting': models['Gradient Boosting'].training_time,
-    'Neural Network': models['Neural Network'].training_time,
-    'SVM': models['SVM'].training_time
-  }));
-
-  // Transform data for radar charts
-  const getModelPerformanceData = (modelType) => {
-    return Object.entries(performanceData).map(([vuln, models]) => ({
-      vulnerability: vulnDisplayNames[vuln] || vuln,
-      precision: models[modelType].precision * 100,
-      recall: models[modelType].recall * 100,
-      f1: models[modelType].f1 * 100
-    }));
-  };
-
-  return (
-    <div className="space-y-8 mt-6">
-      <div className="bg-white p-6 rounded-lg shadow">
-        <h3 className="text-lg font-semibold mb-4">F1 Score Comparison</h3>
-        <div className="h-80">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={f1ScoreData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis domain={[0.8, 1]} />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="Random Forest" fill="#8884d8" />
-              <Bar dataKey="Gradient Boosting" fill="#82ca9d" />
-              <Bar dataKey="Neural Network" fill="#ffc658" />
-              <Bar dataKey="SVM" fill="#ff8042" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div className="bg-white p-6 rounded-lg shadow">
-        <h3 className="text-lg font-semibold mb-4">Training Time Comparison (seconds)</h3>
-        <div className="h-80">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={trainingTimeData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="Random Forest" fill="#8884d8" />
-              <Bar dataKey="Gradient Boosting" fill="#82ca9d" />
-              <Bar dataKey="Neural Network" fill="#ffc658" />
-              <Bar dataKey="SVM" fill="#ff8042" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const TabPanel = ({ children, className = "" }) => (
-  <div className={`bg-white rounded-lg shadow p-6 ${className}`}>
-    {children}
-  </div>
-);
-
-const TabButton = ({ active, onClick, children }) => (
-  <button
-    onClick={onClick}
-    className={`px-4 py-2 font-medium rounded-lg transition-colors ${
-      active
-        ? 'bg-blue-600 text-white'
-        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-    }`}
-  >
-    {children}
-  </button>
-);
-
-const TestResult = ({ result }) => {
-  const [expanded, setExpanded] = useState(false);
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'completed':
-        return 'text-green-600';
-      case 'failed':
-        return 'text-red-600';
-      default:
-        return 'text-gray-600';
-    }
-  };
-
-  const getStatusIcon = (status) => {
-    switch (status) {
-      case 'completed':
-        return <CheckCircle className="w-5 h-5 text-green-600" />;
-      case 'failed':
-        return <XCircle className="w-5 h-5 text-red-600" />;
-      default:
-        return <Clock className="w-5 h-5 text-gray-600" />;
-    }
-  };
-
-  const resultStr = result.result ? JSON.stringify(result.result, null, 2) : "";
-  const shouldTruncate = resultStr.length > 300;
-
-  return (
-    <div className="border rounded-lg p-4 mb-4">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          {getStatusIcon(result.status)}
-          <h4 className="font-medium text-gray-800">{result.test_name}</h4>
-        </div>
-        <span className={`${getStatusColor(result.status)} font-medium`}>
-          {result.status}
-        </span>
-      </div>
-
-      {result.error && (
-        <Alert variant="destructive" className="mt-2">
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{result.error}</AlertDescription>
-        </Alert>
-      )}
-
-      {result.result && (
-        <div className="mt-2 bg-gray-50 p-4 rounded-lg">
-          <pre className="text-sm overflow-x-auto">
-            {shouldTruncate && !expanded ? (
-              <>
-                {resultStr.substring(0, 300)}...
-                <button
-                  onClick={() => setExpanded(true)}
-                  className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
-                >
-                  Show more
-                </button>
-              </>
-            ) : (
-              <>
-                {resultStr}
-                {shouldTruncate && (
-                  <button
-                    onClick={() => setExpanded(false)}
-                    className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
-                  >
-                    Show less
-                  </button>
-                )}
-              </>
-            )}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const CodeDisplay = ({ code, maxHeight = "h-96" }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  // Format the code by removing extra indentation
-  const formattedCode = code.split('\n').map(line => line.trimRight()).join('\n');
-
-  return (
-    <div className="rounded-lg overflow-hidden">
-      <div className="bg-gray-800 text-gray-100 p-4">
-        <div className="flex justify-between items-center mb-2">
-          <div className="flex space-x-2">
-            <div className="w-3 h-3 rounded-full bg-red-500"></div>
-            <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-            <div className="w-3 h-3 rounded-full bg-green-500"></div>
-          </div>
-          <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="text-gray-400 hover:text-white text-sm"
-          >
-            {isExpanded ? 'Collapse' : 'Expand'}
-          </button>
-        </div>
-        <pre className={`overflow-auto ${isExpanded ? 'h-full' : maxHeight} font-mono text-sm`}>
-          <code>{formattedCode}</code>
-        </pre>
-      </div>
-    </div>
-  );
-};
-
-const TestScriptEditor = ({ script, onSave, onCancel }) => {
-  const [editedScript, setEditedScript] = useState(script.script);
-
-  return (
-    <div className="bg-gray-900 text-gray-100 rounded-lg overflow-hidden mt-4">
-      <div className="flex justify-between items-center p-2 bg-gray-800">
-        <div className="flex space-x-2">
-          <div className="w-3 h-3 rounded-full bg-red-500"></div>
-          <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-          <div className="w-3 h-3 rounded-full bg-green-500"></div>
-        </div>
-        <span className="text-xs text-gray-400">Edit Test Script</span>
-        <div className="flex gap-2">
-          <button
-            onClick={() => onSave(editedScript)}
-            className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
-          >
-            <Save className="w-3 h-3" />
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            className="text-gray-400 hover:text-white text-sm"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-      <textarea
-        value={editedScript}
-        onChange={(e) => setEditedScript(e.target.value)}
-        className="w-full p-4 bg-gray-900 text-gray-100 font-mono text-sm outline-none"
-        style={{ height: '400px', resize: 'vertical' }}
-      />
-    </div>
-  );
-};
-
-const TestScriptViewer = ({ script, relevanceScore = 0, onEdit }) => {
-  const [expanded, setExpanded] = useState(false);
-
-  const getPriorityStyle = (priority) => {
-    switch (priority?.toLowerCase()) {
-      case 'critical':
-        return 'bg-red-100 text-red-800';
-      case 'high':
-        return 'bg-orange-100 text-orange-800';
-      case 'medium':
-        return 'bg-yellow-100 text-yellow-800';
-      default:
-        return 'bg-green-100 text-green-800';
-    }
-  };
-
-  const getRelevanceStyle = (score) => {
-    if (score >= 8.0) return 'bg-blue-100 text-blue-800';
-    if (score >= 6.0) return 'bg-blue-100 text-blue-700';
-    return 'bg-blue-50 text-blue-600';
-  };
-
-  return (
-    <div className="bg-gray-50 rounded-lg p-4 mb-4 border border-gray-200">
-      <div className="flex justify-between items-start mb-2">
-        <div className="space-y-2">
-          <h4 className="font-medium text-gray-800">{script.test_name}</h4>
-          <div className="flex items-center gap-2">
-            <span className={`px-2 py-1 text-xs rounded-full ${getPriorityStyle(script.priority)}`}>
-              {script.priority || 'Low'}
-            </span>
-            <span className={`px-2 py-1 text-xs rounded-full ${getRelevanceStyle(relevanceScore)}`}>
-              Relevance: {relevanceScore.toFixed(2)}
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => onEdit(script)}
-            className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1"
-          >
-            <Edit className="w-4 h-4" />
-            Edit
-          </button>
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-          >
-            {expanded ? 'Hide Code' : 'Show Code'}
-          </button>
-        </div>
-      </div>
-
-      <p className="text-sm text-gray-600 mb-2 line-clamp-2">
-        {script.description}
-      </p>
-
-      {expanded && (
-        <div className="bg-gray-900 text-gray-100 rounded-lg overflow-hidden mt-4">
-          <div className="flex justify-between items-center p-2 bg-gray-800">
-            <div className="flex space-x-2">
-              <div className="w-3 h-3 rounded-full bg-red-500"></div>
-              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-              <div className="w-3 h-3 rounded-full bg-green-500"></div>
-            </div>
-            <span className="text-xs text-gray-400">Test Script</span>
-          </div>
-          <pre className="p-4 overflow-x-auto font-mono text-sm whitespace-pre-wrap">
-            <code>{script.script}</code>
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
-  const [testScripts, setTestScripts] = useState([]);
-  const [testResults, setTestResults] = useState([]);
-  const [relevantCasesCount, setRelevantCasesCount] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [relevanceThreshold, setRelevanceThreshold] = useState(8.0);
-  const [editingScript, setEditingScript] = useState(null);
-
-  // Helper function to determine threshold label
-  const getThresholdLabel = (threshold) => {
-    if (threshold >= 8.0) return "high";
-    if (threshold >= 6.0) return "medium";
-    if (threshold >= 4.0) return "low";
-    return "minimal";
-  };
-
-  // Helper function to get relevance label
-  const getRelevanceLabel = (score) => {
-    if (score >= SCORE_RANGES.relevance.High) return 'High';
-    if (score >= SCORE_RANGES.relevance.Medium) return 'Medium';
-    if (score >= SCORE_RANGES.relevance.Low) return 'Low';
-    return 'Minimal';
-  };
-
-  // This function calculates risk score based on test properties and risk assessment
-  const getRiskScore = (test, riskAssessment) => {
-    // Normalize test type and description for comparison
-    const normalizedType = (test.type || '').toLowerCase();
-    const normalizedDesc = (test.description || '').toLowerCase();
-    const normalizedName = (test.name || '').toLowerCase();
-    const combinedText = `${normalizedType} ${normalizedDesc} ${normalizedName}`;
-
-    // Find matching risk type based on keywords with broader matching
-    let matchedRisk = Object.entries(riskMapping).find(([key]) =>
-      combinedText.includes(key)
-    );
-
-    // If no match found and this is likely an Auth Bypass test
-    if (!matchedRisk &&
-        (combinedText.includes('auth') ||
-         combinedText.includes('bypass') ||
-         combinedText.includes('authentication'))) {
-      matchedRisk = ['auth', 'auth_bypass_risk'];
-    }
-
-    // If no match found and this is likely an SQLi test
-    if (!matchedRisk &&
-        (combinedText.includes('sql') ||
-         combinedText.includes('injection') ||
-         combinedText.includes('database'))) {
-      matchedRisk = ['sql', 'sql_injection_risk'];
-    }
-
-    // If still no match, assign default based on priority
-    if (!matchedRisk) {
-      const priority = test.priority?.toLowerCase() || 'medium';
-      let defaultRiskScore = 0.3; // Default medium risk
-
-      if (priority === 'critical') defaultRiskScore = 0.8;
-      else if (priority === 'high') defaultRiskScore = 0.6;
-      else if (priority === 'low') defaultRiskScore = 0.2;
-
-      return defaultRiskScore;
-    }
-
-    const riskType = matchedRisk ? matchedRisk[1] : null;
-    const riskScore = riskType ? (riskAssessment[riskType] || 0.3) : 0.3; // Default to 0.3 if not found
-
-    // Apply priority weighting
-    const priorityWeight = {
-      'Critical': 1.5,
-      'High': 1.25,
-      'Medium': 1.0,
-      'Low': 0.75
-    }[test.priority] || 1.0;
-
-    return riskScore * priorityWeight;
-  };
-
-  // Calculate completeness score based on test properties
-  const calculateCompletenessScore = (test) => {
-    let score = 0;
-
-    if (Array.isArray(test.steps) && test.steps.length > 0) {
-      score += COMPLETENESS_SCORES.steps;
-    }
-    if (test.expected_results) {
-      score += COMPLETENESS_SCORES.expectedResults;
-    }
-    if (test.remediation) {
-      score += COMPLETENESS_SCORES.remediation;
-    }
-
-    return Math.min(score, 3.0);
-  };
-
-  // Unified relevance score calculation
-  const calculateRelevanceScore = (test, riskAssessment = {}) => {
-    // 1. Risk-based score (0-6 points)
-    const riskScore = getRiskScore(test, riskAssessment);
-    const riskBasedScore = Math.min(riskScore * RISK_MULTIPLIER, 6.0);
-
-    // 2. Priority score (0-1 points)
-    const priorityScore = PRIORITY_SCORES[test.priority] || PRIORITY_SCORES.Low;
-
-    // 3. Completeness score (0-3 points)
-    const completenessScore = calculateCompletenessScore(test);
-
-    // Calculate total score and round to 2 decimal places
-    const totalScore = parseFloat((riskBasedScore + priorityScore + completenessScore).toFixed(2));
-
-    return {
-      total: Math.min(totalScore, 10.0),
-      breakdown: {
-        riskBased: riskBasedScore,
-        priority: priorityScore,
-        completeness: completenessScore
-      },
-      components: {
-        hasSteps: Array.isArray(test.steps) && test.steps.length > 0,
-        hasExpectedResults: !!test.expected_results,
-        hasRemediation: !!test.remediation
-      }
-    };
-  };
-
-  // Get test cases filtered by relevance threshold and sorted by relevance
-  const getRelevantTestCases = useCallback((cases, riskAssessment) => {
-    // Flat list of all test cases with scores
-    const allTestCases = cases.flatMap(suite => {
-      // Get tests from the suite
-      const testsFromSuite = suite.test_cases || [];
-
-      return testsFromSuite.map(test => {
-        // Check if test already has scores calculated
-        if (test.total !== undefined) {
-          return {
-            ...test,
-            type: suite.type,
-            name: test.name || `${suite.type} Test`,
-            description: test.description || suite.description,
-            priority: test.priority || 'Medium',
-            relevance_score: test.total,
-            risk_score: (test.breakdown?.riskBased / RISK_MULTIPLIER) || 0
-          };
-        }
-
-        // Calculate scores for tests without pre-calculated values
-        const scores = calculateRelevanceScore(test, riskAssessment);
-        return {
-          ...test,
-          type: suite.type,
-          name: test.name || `${suite.type} Test`,
-          description: test.description || suite.description,
-          priority: test.priority || 'Medium',
-          relevance_score: scores.total,
-          risk_score: scores.breakdown.riskBased / RISK_MULTIPLIER,
-          breakdown: scores.breakdown,
-          components: scores.components
-        };
-      });
-    });
-
-    // Filter by threshold and sort by relevance
-    const filteredCases = allTestCases
-      .filter(test => test.relevance_score >= relevanceThreshold)
-      .sort((a, b) => b.relevance_score - a.relevance_score);
-
-    // Update the count
-    setRelevantCasesCount(filteredCases.length);
-
-    return {
-      cases: filteredCases,
-      count: filteredCases.length
-    };
-  }, [relevanceThreshold]);
-
-  // Make sure test scripts can be executed
-  const cleanScriptForExecution = (scriptContent) => {
-    let cleanedScript = scriptContent;
-
-    // Remove markdown and find Python imports
-    const importIndex = scriptContent.indexOf('import ');
-    if (importIndex > 0) {
-      cleanedScript = scriptContent.substring(importIndex);
-    }
-
-    // Remove explanation sections
-    const explanationIndex = cleanedScript.indexOf('### Explanation');
-    if (explanationIndex > 0) {
-      cleanedScript = cleanedScript.substring(0, explanationIndex).trim();
-    }
-
-    // Remove code block markers
-    cleanedScript = cleanedScript.replace(/```python\n/g, '');
-    cleanedScript = cleanedScript.replace(/```/g, '');
-
-    // Add run_test wrapper if needed
-    if (!cleanedScript.includes('async def run_test()')) {
-      cleanedScript = `
-import asyncio
-import aiohttp
-import json
-import logging
-
-# Configure basic logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Function to run the main test
-async def run_test():
-    try:
-        results = {}
-        # Main test logic
-${cleanedScript.split('\n').map(line => '        ' + line).join('\n')}
-
-        return results
-    except Exception as e:
-        logger.error(f"Test execution error: {str(e)}")
-        return {"error": str(e)}
-
-# Allow importing this module without running the test
-if __name__ == "__main__":
-    asyncio.run(run_test())
-`;
-    }
-
-    return cleanedScript;
-  };
-
-  // Generate test scripts for selected test cases
-  const generateTestScripts = async () => {
-    if (!test_cases?.length) return;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      // Get relevant test cases
-      const { cases: relevantCases, count } = getRelevantTestCases(test_cases, risk_assessment);
-
-      if (relevantCases.length === 0) {
-        setTestScripts([]);
-        setError('No test cases meet the minimum relevance threshold');
-        return;
-      }
-
-      // Prepare test cases for API
-      const enhancedTestCases = relevantCases.map(testCase => ({
-        name: testCase.name,
-        type: testCase.type,
-        description: testCase.description,
-        priority: testCase.priority,
-        steps: testCase.steps || [],
-        expected_results: testCase.expected_results || '',
-        remediation: testCase.remediation || '',
-        relevance_score: testCase.relevance_score,
-        risk_score: testCase.risk_score,
-        metadata: {
-          relevance_score: testCase.relevance_score,
-          risk_score: testCase.risk_score,
-          priority: testCase.priority,
-          type: testCase.type,
-          breakdown: testCase.breakdown
-        }
-      }));
-
-      // Limit to 3 test cases for performance
-      const limitedTestCases = enhancedTestCases.slice(0, 3);
-
-      // API request
-      const endpoint = api_details?.request?.uri || '';
-      const method = api_details?.method || api_details?.request?.method || 'POST';
-
-      const apiDetailsObj = {
-        method: method || "POST",
-        request: {
-          uri: endpoint,
-          method: method || "POST",
-          headers: api_details?.request?.headers || {},
-          body: api_details?.request?.body || {}
-        },
-        response: api_details?.response || {}
-      };
-
-      // Mock API call - in real app, use fetch to endpoint
-      // This is a simulation to avoid hitting the actual API
-      console.log('Would send to API:', {
-        endpoint: apiDetailsObj.request.uri,
-        test_cases: limitedTestCases,
-        api_details: apiDetailsObj
-      });
-
-      // Simulate API response with mock data
-      const mockScripts = limitedTestCases.map(tc => ({
-        test_name: tc.name,
-        test_type: tc.type,
-        description: tc.description,
-        script: `
-import asyncio
-import aiohttp
-import json
-import logging
-
-async def test_${tc.type.replace(/[^a-z0-9]/gi, '_').toLowerCase()}():
-    """
-    Test for ${tc.name}
-    """
-    url = "${endpoint}"
-
-    # Headers
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-
-    # Test payload based on vulnerability type
-    payload = {"test": "data"}
-
-    async with aiohttp.ClientSession() as session:
-        async with session.${method.toLowerCase()}(url, headers=headers, json=payload) as response:
-            status = response.status
-            response_text = await response.text()
-            try:
-                response_json = await response.json()
-            except:
-                response_json = {}
-
-            # Analyze the response
-            results = {
-                "status_code": status,
-                "vulnerable": status >= 400,
-                "message": "Test completed successfully"
-            }
-
-            return results
-
-async def run_test():
-    return await test_${tc.type.replace(/[^a-z0-9]/gi, '_').toLowerCase()}()
-`,
-        priority: tc.priority
-      }));
-
-      // Save the generated scripts
-      setTestScripts(mockScripts.map(script => ({
-        ...script,
-        relevance_score: limitedTestCases.find(tc => tc.name === script.test_name)?.relevance_score || 0,
-        risk_score: limitedTestCases.find(tc => tc.name === script.test_name)?.risk_score || 0,
-        original_script: script.script,
-        cleaned_script: cleanScriptForExecution(script.script)
-      })));
-
-    } catch (err) {
-      setError(err.message || 'Failed to generate test scripts');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle script editing
-  const handleEditScript = (script) => {
-    setEditingScript(script);
-  };
-
-  const handleSaveScript = (updatedCode) => {
-    setTestScripts(prev =>
-      prev.map(script =>
-        script.test_name === editingScript.test_name
-          ? {
-              ...script,
-              script: updatedCode,
-              cleaned_script: cleanScriptForExecution(updatedCode)
-            }
-          : script
-      )
-    );
-    setEditingScript(null);
-  };
-
-  const handleCancelEdit = () => {
-    setEditingScript(null);
-  };
-
-  // Execute test scripts
-  const executeTests = async () => {
-    setIsExecuting(true);
-    setError(null);
-    setTestResults([]);
-
-    try {
-      // Mock execution - in a real app this would be an API call
-      setTimeout(() => {
-        const mockResults = testScripts.map(script => ({
-          test_name: script.test_name,
-          test_type: script.test_type,
-          status: Math.random() > 0.3 ? 'completed' : 'failed',
-          result: {
-            status_code: Math.floor(Math.random() * 2) === 0 ? 200 : 403,
-            vulnerable: Math.random() > 0.5,
-            details: "This is a mock test result"
-          },
-          error: Math.random() > 0.7 ? "Mock error message" : null
-        }));
-
-        setTestResults(mockResults);
-        setIsExecuting(false);
-      }, 2000);
-    } catch (err) {
-      setError(err.message || 'Failed to execute tests');
-      setIsExecuting(false);
-    }
-  };
-
-  // Reset scripts to original versions
-  const resetScripts = () => {
-    setTestScripts(prev =>
-      prev.map(script => ({
-        ...script,
-        script: script.original_script,
-        cleaned_script: cleanScriptForExecution(script.original_script)
-      }))
-    );
-  };
-
-  // Generate scripts when component mounts or criteria changes
-  useEffect(() => {
-    if (test_cases?.length > 0 && api_details?.request?.uri) {
-      // Small delay to prevent immediate execution
-      const timer = setTimeout(() => {
-        generateTestScripts();
-      }, 300);
-
-      return () => clearTimeout(timer);
-    }
-  }, [test_cases, api_details?.request?.uri, relevanceThreshold]);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center p-8">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h3 className="text-xl font-bold text-gray-900">API Test Automation</h3>
-          <div className="flex items-center gap-4 mt-2">
-            <p className="text-sm text-gray-600">
-              {relevantCasesCount} {getThresholdLabel(relevanceThreshold)} relevance test cases selected
-            </p>
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-gray-600">Relevance Threshold:</label>
-              <select
-                value={relevanceThreshold}
-                onChange={(e) => setRelevanceThreshold(Number(e.target.value))}
-                className="text-sm border rounded-md px-2 py-1"
-              >
-                <option value={4.0}>Low (4.0+)</option>
-                <option value={6.0}>Medium (6.0+)</option>
-                <option value={8.0}>High (8.0+)</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          {testScripts.length > 0 && (
-            <button
-              onClick={resetScripts}
-              className="flex items-center gap-2 bg-gray-100 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-200"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Reset Scripts
-            </button>
-          )}
-          <button
-            onClick={executeTests}
-            disabled={isExecuting || testScripts.length === 0}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            {isExecuting ? (
-              <>
-                <Clock className="w-4 h-4 animate-spin" />
-                Executing...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                Run Tests ({testScripts.length})
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <Alert variant="destructive">
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="space-y-4">
-          <h4 className="font-medium text-gray-800">Test Scripts</h4>
-          {editingScript ? (
-            <TestScriptEditor
-              script={editingScript}
-              onSave={handleSaveScript}
-              onCancel={handleCancelEdit}
-            />
-          ) : (
-            testScripts.length > 0 ? (
-              testScripts.map((script, index) => (
-                <TestScriptViewer
-                  key={index}
-                  script={script}
-                  relevanceScore={script.relevance_score}
-                  onEdit={() => handleEditScript(script)}
-                />
-              ))
-            ) : (
-              <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
-                No test scripts available
-              </div>
-            )
-          )}
-        </div>
-
-        <div className="space-y-4">
-          <h4 className="font-medium text-gray-800">Test Results</h4>
-          {testResults.length > 0 ? (
-            testResults.map((result, index) => (
-              <TestResult key={index} result={result} />
-            ))
-          ) : (
-            <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
-              No test results available. Click "Run Tests" to start testing.
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const CombinedTestCaseList = ({ test_cases, risk_assessment }) => {
   // First calculate scores for all suites
   const scoredSuites = test_cases.map(suite =>
     suite.relevance_score !== undefined ?
       suite :
-      calculateSuiteScores(suite, risk_assessment || {})
+      ScoreCalculator.calculateSuiteScores(suite, risk_assessment || {})
   );
 
   // Create a flat list of all test cases with their suite information
@@ -2079,6 +1131,748 @@ const SingleTestCase = ({ item }) => {
   );
 };
 
+const ModelPerformanceGraphs = () => {
+  const [performanceData, setPerformanceData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchPerformanceData = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/model-performance');
+        if (!response.ok) {
+          throw new Error('Failed to fetch performance data');
+        }
+        const data = await response.json();
+        if (data.status === 'success') {
+          // Transform the data for visualization
+          const transformedData = Object.entries(data.data).reduce((acc, [vuln, models]) => {
+            acc[vuln] = {
+              'Random Forest': models.random_forest || {},
+              'Gradient Boosting': models.gradient_boosting || {},
+              'Neural Network': models.neural_network || {},
+              'SVM': models.svm || {}
+            };
+            return acc;
+          }, {});
+          setPerformanceData(transformedData);
+        } else {
+          throw new Error(data.message || 'Failed to get performance data');
+        }
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchPerformanceData();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-4 bg-red-50 text-red-700 rounded-lg">
+        Error loading performance data: {error}
+      </div>
+    );
+  }
+
+  if (!performanceData) return null;
+
+  // Transform data for F1 score comparison
+  const f1ScoreData = Object.entries(performanceData).map(([vuln, models]) => ({
+    name: VULNERABILITY_DISPLAY_NAMES[vuln] || vuln,
+    'Random Forest': models['Random Forest'].f1,
+    'Gradient Boosting': models['Gradient Boosting'].f1,
+    'Neural Network': models['Neural Network'].f1,
+    'SVM': models['SVM'].f1
+  }));
+
+  // Transform data for training time comparison
+  const trainingTimeData = Object.entries(performanceData).map(([vuln, models]) => ({
+    name: VULNERABILITY_DISPLAY_NAMES[vuln] || vuln,
+    'Random Forest': models['Random Forest'].training_time,
+    'Gradient Boosting': models['Gradient Boosting'].training_time,
+    'Neural Network': models['Neural Network'].training_time,
+    'SVM': models['SVM'].training_time
+  }));
+
+  return (
+    <div className="space-y-8 mt-6">
+      <div className="bg-white p-6 rounded-lg shadow">
+        <h3 className="text-lg font-semibold mb-4">F1 Score Comparison</h3>
+        <div className="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={f1ScoreData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="name" />
+              <YAxis domain={[0.8, 1]} />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="Random Forest" fill="#8884d8" />
+              <Bar dataKey="Gradient Boosting" fill="#82ca9d" />
+              <Bar dataKey="Neural Network" fill="#ffc658" />
+              <Bar dataKey="SVM" fill="#ff8042" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="bg-white p-6 rounded-lg shadow">
+        <h3 className="text-lg font-semibold mb-4">Training Time Comparison (seconds)</h3>
+        <div className="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={trainingTimeData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="name" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="Random Forest" fill="#8884d8" />
+              <Bar dataKey="Gradient Boosting" fill="#82ca9d" />
+              <Bar dataKey="Neural Network" fill="#ffc658" />
+              <Bar dataKey="SVM" fill="#ff8042" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// UI Components
+const TabPanel = ({ children, className = "" }) => (
+  <div className={`bg-white rounded-lg shadow p-6 ${className}`}>
+    {children}
+  </div>
+);
+
+const TabButton = ({ active, onClick, children }) => (
+  <button
+    onClick={onClick}
+    className={`px-4 py-2 font-medium rounded-lg transition-colors ${
+      active
+        ? 'bg-blue-600 text-white'
+        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+    }`}
+  >
+    {children}
+  </button>
+);
+
+// Function to generate test scripts using the Gen AI API
+const generateTestScripts = async (testCases, apiDetails) => {
+  if (!testCases?.length) return [];
+
+  try {
+    // Prepare test cases for API
+    const enhancedTestCases = testCases.map(testCase => ({
+      name: testCase.name,
+      type: testCase.type,
+      description: testCase.description,
+      priority: testCase.priority,
+      steps: testCase.steps || [],
+      expected_results: testCase.expected_results || '',
+      remediation: testCase.remediation || '',
+      relevance_score: testCase.relevance_score || 0,
+      risk_score: testCase.risk_score || 0
+    }));
+
+    // Extract API details
+    const endpoint = apiDetails?.request?.uri || '';
+    const method = apiDetails?.method || apiDetails?.request?.method || 'POST';
+
+    const apiDetailsObj = {
+      method: method || "POST",
+      request: {
+        uri: endpoint,
+        method: method || "POST",
+        headers: apiDetails?.request?.headers || {},
+        body: apiDetails?.request?.body || {}
+      },
+      response: apiDetails?.response || {}
+    };
+
+    console.log('Sending to API:', {
+      endpoint: apiDetailsObj.request.uri,
+      test_cases: enhancedTestCases.slice(0, 3), // Limit to 3 for performance
+      api_details: apiDetailsObj
+    });
+
+    // Call the API for script generation
+    const response = await fetch('http://localhost:8000/api/generate-scripts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        endpoint: endpoint,
+        test_cases: enhancedTestCases.slice(0, 3), // Limit to 3 test cases
+        api_details: apiDetailsObj
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`API request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    // Return the scripts if successful
+    if (result.scripts && result.scripts.length > 0) {
+      return result.scripts.map(script => ({
+        ...script,
+        relevance_score: enhancedTestCases.find(tc => tc.name === script.test_name)?.relevance_score || 0,
+        risk_score: enhancedTestCases.find(tc => tc.name === script.test_name)?.risk_score || 0,
+        original_script: script.script
+      }));
+    }
+
+    return [];
+  } catch (error) {
+    console.error('Error generating test scripts:', error);
+    throw error;
+  }
+};
+
+// Function to execute test scripts via the API
+const executeTestScripts = async (testScripts, apiEndpoint) => {
+  try {
+    const testData = testScripts.map(script => ({
+      test_name: script.test_name,
+      test_type: script.test_type,
+      script: script.script
+    }));
+
+    // Call the execution API
+    const response = await fetch('http://localhost:8000/api/execute-tests', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        endpoint: apiEndpoint,
+        test_cases: testData
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`API request failed with status ${response.status}`);
+    }
+
+    const result = await response.json();
+    return result.results || [];
+  } catch (error) {
+    console.error('Error executing test scripts:', error);
+    throw error;
+  }
+};
+
+//TestAutomation component with focused GenAI integration
+const TestAutomation = ({ test_cases = [], api_details, risk_assessment }) => {
+  const [testScripts, setTestScripts] = useState([]);
+  const [testResults, setTestResults] = useState([]);
+  const [relevantCasesCount, setRelevantCasesCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [relevanceThreshold, setRelevanceThreshold] = useState(8.0);
+  const [editingScript, setEditingScript] = useState(null);
+
+  // Helper function to determine threshold label
+  const getThresholdLabel = (threshold) => {
+    if (threshold >= 8.0) return "high";
+    if (threshold >= 6.0) return "medium";
+    if (threshold >= 4.0) return "low";
+    return "minimal";
+  };
+
+  // Get test cases filtered by relevance threshold and sorted by relevance
+  const getRelevantTestCases = useCallback((cases, riskAssessment) => {
+    // Flat list of all test cases with scores
+    const allTestCases = cases.flatMap(suite => {
+      // Get tests from the suite
+      const testsFromSuite = suite.test_cases || [];
+
+      return testsFromSuite.map(test => {
+        // Check if test already has scores calculated
+        if (test.total !== undefined) {
+          return {
+            ...test,
+            type: suite.type,
+            name: test.name || `${suite.type} Test`,
+            description: test.description || suite.description,
+            priority: test.priority || 'Medium',
+            relevance_score: test.total,
+            risk_score: (test.breakdown?.riskBased / RISK_MULTIPLIER) || 0
+          };
+        }
+
+        // Calculate scores for tests without pre-calculated values
+        const scores = ScoreCalculator.calculateRelevanceScore(test, riskAssessment);
+        return {
+          ...test,
+          type: suite.type,
+          name: test.name || `${suite.type} Test`,
+          description: test.description || suite.description,
+          priority: test.priority || 'Medium',
+          relevance_score: scores.total,
+          risk_score: scores.breakdown.riskBased / RISK_MULTIPLIER,
+          breakdown: scores.breakdown,
+          components: scores.components
+        };
+      });
+    });
+
+    // Filter by threshold and sort by relevance
+    const filteredCases = allTestCases
+      .filter(test => test.relevance_score >= relevanceThreshold)
+      .sort((a, b) => b.relevance_score - a.relevance_score);
+
+    // Update the count
+    setRelevantCasesCount(filteredCases.length);
+
+    return filteredCases;
+  }, [relevanceThreshold]);
+
+  // Function to generate scripts using GenAI API
+  const handleGenerateScripts = async () => {
+    if (!test_cases?.length) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Get relevant test cases
+      const relevantCases = getRelevantTestCases(test_cases, risk_assessment);
+
+      if (relevantCases.length === 0) {
+        setTestScripts([]);
+        setError('No test cases meet the minimum relevance threshold');
+        setLoading(false);
+        return;
+      }
+
+      // Generate scripts via the API
+      const scripts = await generateTestScripts(relevantCases, api_details);
+
+      if (scripts.length > 0) {
+        setTestScripts(scripts);
+      } else {
+        setError('No test scripts were generated');
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to generate test scripts');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Function to execute test scripts
+  const handleExecuteTests = async () => {
+    if (!testScripts.length) return;
+
+    setIsExecuting(true);
+    setError(null);
+    setTestResults([]);
+
+    try {
+      // Execute scripts via the API
+      const results = await executeTestScripts(testScripts, api_details?.request?.uri || '');
+
+      if (results.length > 0) {
+        setTestResults(results);
+      } else {
+        setError('No test results were returned');
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to execute tests');
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  // Handle script editing
+  const handleEditScript = (script) => {
+    setEditingScript(script);
+  };
+
+  const handleSaveScript = (updatedCode) => {
+    setTestScripts(prev =>
+      prev.map(script =>
+        script.test_name === editingScript.test_name
+          ? { ...script, script: updatedCode }
+          : script
+      )
+    );
+    setEditingScript(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingScript(null);
+  };
+
+  // Generate scripts when component mounts or criteria changes
+  useEffect(() => {
+    if (test_cases?.length > 0 && api_details?.request?.uri) {
+      // Small delay to prevent immediate execution
+      const timer = setTimeout(() => {
+        handleGenerateScripts();
+      }, 300);
+
+      return () => clearTimeout(timer);
+    }
+  }, [test_cases, api_details?.request?.uri, relevanceThreshold]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h3 className="text-xl font-bold text-gray-900">API Test Automation</h3>
+          <div className="flex items-center gap-4 mt-2">
+            <p className="text-sm text-gray-600">
+              {relevantCasesCount} {getThresholdLabel(relevanceThreshold)} relevance test cases selected
+            </p>
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-gray-600">Relevance Threshold:</label>
+              <select
+                value={relevanceThreshold}
+                onChange={(e) => setRelevanceThreshold(Number(e.target.value))}
+                className="text-sm border rounded-md px-2 py-1"
+              >
+                <option value={4.0}>Low (4.0+)</option>
+                <option value={6.0}>Medium (6.0+)</option>
+                <option value={8.0}>High (8.0+)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleGenerateScripts}
+            disabled={loading}
+            className="flex items-center gap-2 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed"
+          >
+            {loading ? (
+              <>
+                <Clock className="w-4 h-4 animate-spin" />
+                Generating...
+              </>
+            ) : (
+              <>
+                <Edit className="w-4 h-4" />
+                Generate Scripts
+              </>
+            )}
+          </button>
+          <button
+            onClick={handleExecuteTests}
+            disabled={isExecuting || testScripts.length === 0}
+            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+          >
+            {isExecuting ? (
+              <>
+                <Clock className="w-4 h-4 animate-spin" />
+                Executing...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                Run Tests ({testScripts.length})
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="space-y-4">
+          <h4 className="font-medium text-gray-800">Test Scripts</h4>
+          {editingScript ? (
+            <TestScriptEditor
+              script={editingScript}
+              onSave={handleSaveScript}
+              onCancel={handleCancelEdit}
+            />
+          ) : (
+            testScripts.length > 0 ? (
+              testScripts.map((script, index) => (
+                <TestScriptViewer
+                  key={index}
+                  script={script}
+                  relevanceScore={script.relevance_score}
+                  onEdit={() => handleEditScript(script)}
+                />
+              ))
+            ) : (
+              <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
+                No test scripts available
+              </div>
+            )
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <h4 className="font-medium text-gray-800">Test Results</h4>
+          {testResults.length > 0 ? (
+            testResults.map((result, index) => (
+              <TestResult key={index} result={result} />
+            ))
+          ) : (
+            <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg">
+              No test results available. Click "Run Tests" to start testing.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TestScriptEditor = ({ script, onSave, onCancel }) => {
+  const [editedScript, setEditedScript] = useState(script.script);
+
+  return (
+    <div className="bg-gray-900 text-gray-100 rounded-lg overflow-hidden mt-4">
+      <div className="flex justify-between items-center p-2 bg-gray-800">
+        <div className="flex space-x-2">
+          <div className="w-3 h-3 rounded-full bg-red-500"></div>
+          <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+          <div className="w-3 h-3 rounded-full bg-green-500"></div>
+        </div>
+        <span className="text-xs text-gray-400">Edit Test Script</span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => onSave(editedScript)}
+            className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
+          >
+            <Save className="w-3 h-3" />
+            Save
+          </button>
+          <button
+            onClick={onCancel}
+            className="text-gray-400 hover:text-white text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      <textarea
+        value={editedScript}
+        onChange={(e) => setEditedScript(e.target.value)}
+        className="w-full p-4 bg-gray-900 text-gray-100 font-mono text-sm outline-none"
+        style={{ height: '400px', resize: 'vertical' }}
+      />
+    </div>
+  );
+};
+
+const TestScriptViewer = ({ script, relevanceScore = 0, onEdit }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  const getPriorityStyle = (priority) => {
+    switch (priority?.toLowerCase()) {
+      case 'critical':
+        return 'bg-red-100 text-red-800';
+      case 'high':
+        return 'bg-orange-100 text-orange-800';
+      case 'medium':
+        return 'bg-yellow-100 text-yellow-800';
+      default:
+        return 'bg-green-100 text-green-800';
+    }
+  };
+
+  const getRelevanceStyle = (score) => {
+    if (score >= 8.0) return 'bg-blue-100 text-blue-800';
+    if (score >= 6.0) return 'bg-blue-100 text-blue-700';
+    return 'bg-blue-50 text-blue-600';
+  };
+
+  return (
+    <div className="bg-gray-50 rounded-lg p-4 mb-4 border border-gray-200">
+      <div className="flex justify-between items-start mb-2">
+        <div className="space-y-2">
+          <h4 className="font-medium text-gray-800">{script.test_name}</h4>
+          <div className="flex items-center gap-2">
+            <span className={`px-2 py-1 text-xs rounded-full ${getPriorityStyle(script.priority)}`}>
+              {script.priority || 'Low'}
+            </span>
+            <span className={`px-2 py-1 text-xs rounded-full ${getRelevanceStyle(relevanceScore)}`}>
+              Relevance: {relevanceScore.toFixed(2)}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onEdit(script)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1"
+          >
+            <Edit className="w-4 h-4" />
+            Edit
+          </button>
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+          >
+            {expanded ? 'Hide Code' : 'Show Code'}
+          </button>
+        </div>
+      </div>
+
+      <p className="text-sm text-gray-600 mb-2 line-clamp-2">
+        {script.description}
+      </p>
+
+      {expanded && (
+        <div className="bg-gray-900 text-gray-100 rounded-lg overflow-hidden mt-4">
+          <div className="flex justify-between items-center p-2 bg-gray-800">
+            <div className="flex space-x-2">
+              <div className="w-3 h-3 rounded-full bg-red-500"></div>
+              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+              <div className="w-3 h-3 rounded-full bg-green-500"></div>
+            </div>
+            <span className="text-xs text-gray-400">Test Script</span>
+          </div>
+          <pre className="p-4 overflow-x-auto font-mono text-sm whitespace-pre-wrap">
+            <code>{script.script}</code>
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Format the code by removing extra indentation
+  const formattedCode = code.split('\n').map(line => line.trimRight()).join('\n');
+
+  return (
+    <div className="rounded-lg overflow-hidden">
+      <div className="bg-gray-800 text-gray-100 p-4">
+        <div className="flex justify-between items-center mb-2">
+          <div className="flex space-x-2">
+            <div className="w-3 h-3 rounded-full bg-red-500"></div>
+            <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+            <div className="w-3 h-3 rounded-full bg-green-500"></div>
+          </div>
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="text-gray-400 hover:text-white text-sm"
+          >
+            {isExpanded ? 'Collapse' : 'Expand'}
+          </button>
+        </div>
+        <pre className={`overflow-auto ${isExpanded ? 'h-full' : maxHeight} font-mono text-sm`}>
+          <code>{formattedCode}</code>
+        </pre>
+      </div>
+    </div>
+  );
+};
+
+const TestResult = ({ result }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'completed':
+        return 'text-green-600';
+      case 'failed':
+        return 'text-red-600';
+      default:
+        return 'text-gray-600';
+    }
+  };
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'completed':
+        return <CheckCircle className="w-5 h-5 text-green-600" />;
+      case 'failed':
+        return <XCircle className="w-5 h-5 text-red-600" />;
+      default:
+        return <Clock className="w-5 h-5 text-gray-600" />;
+    }
+  };
+
+  const resultStr = result.result ? JSON.stringify(result.result, null, 2) : "";
+  const shouldTruncate = resultStr.length > 300;
+
+  return (
+    <div className="border rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          {getStatusIcon(result.status)}
+          <h4 className="font-medium text-gray-800">{result.test_name}</h4>
+        </div>
+        <span className={`${getStatusColor(result.status)} font-medium`}>
+          {result.status}
+        </span>
+      </div>
+
+      {result.error && (
+        <Alert variant="destructive" className="mt-2">
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{result.error}</AlertDescription>
+        </Alert>
+      )}
+
+      {result.result && (
+        <div className="mt-2 bg-gray-50 p-4 rounded-lg">
+          <pre className="text-sm overflow-x-auto">
+            {shouldTruncate && !expanded ? (
+              <>
+                {resultStr.substring(0, 300)}...
+                <button
+                  onClick={() => setExpanded(true)}
+                  className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
+                >
+                  Show more
+                </button>
+              </>
+            ) : (
+              <>
+                {resultStr}
+                {shouldTruncate && (
+                  <button
+                    onClick={() => setExpanded(false)}
+                    className="block mt-2 text-blue-600 hover:text-blue-800 text-xs"
+                  >
+                    Show less
+                  </button>
+                )}
+              </>
+            )}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ResultsDisplay = ({ results, onReset }) => {
   const [activeTab, setActiveTab] = useState('risk');
   const [showApiDetails, setShowApiDetails] = useState(true);
@@ -2097,7 +1891,6 @@ const ResultsDisplay = ({ results, onReset }) => {
   const tabs = [
     { id: 'risk', label: 'Risk Assessment' },
     { id: 'performance', label: 'Model Performance' },
-    { id: 'relevance', label: 'Test Case Relevance' },
     { id: 'tests', label: 'Security Tests' },
     { id: 'automation', label: 'Test Automation' }
   ];
@@ -2207,12 +2000,6 @@ const ResultsDisplay = ({ results, onReset }) => {
             <TabPanel>
               <h3 className="font-semibold text-xl text-gray-900 mb-6">Model Performance Analysis</h3>
               <ModelPerformanceGraphs />
-            </TabPanel>
-          )}
-
-          {activeTab === 'relevance' && test_cases.length > 0 && (
-            <TabPanel className="mb-0">
-              <TestRelevanceDisplay test_cases={test_cases} risk_assessment={risk_assessment} />
             </TabPanel>
           )}
 

@@ -431,6 +431,7 @@ class SecurityModel:
         try:
             # Extracting features from API details and reshaping for model input
             features = self.extract_features(api_details)
+            # Transforms the one-dimensional array into a two-dimensional array with 1 row
             features = features.reshape(1, -1)
 
             # Getting context-aware risk multipliers based on request characteristics
