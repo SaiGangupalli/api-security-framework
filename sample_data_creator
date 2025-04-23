@@ -1,0 +1,281 @@
+# sample_data_creator.py
+"""
+Script to create a sample training dataset for the Jira Security Analysis System.
+This generates an Excel file with synthetic user stories that include both
+security/fraud related stories and non-security/fraud stories.
+"""
+
+import os
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import random
+
+# Ensure output directory exists
+os.makedirs('data/raw', exist_ok=True)
+
+# Number of sample user stories to generate
+NUM_STORIES = 100
+
+# Project keys
+PROJECT_KEYS = ['PROJ1', 'PROJ2', 'PROJ3', 'SEC', 'FRAUD']
+
+# Sample user story templates
+SECURITY_TEMPLATES = [
+    "As a user, I want secure authentication so that my account is protected",
+    "As an admin, I need to encrypt sensitive data to prevent data leaks",
+    "Implement password complexity requirements to enhance security",
+    "Add two-factor authentication to the login process",
+    "Update SSL certificates for secure communication",
+    "Fix cross-site scripting vulnerability in the search form",
+    "Implement role-based access control for user permissions",
+    "Add input validation to prevent SQL injection attacks",
+    "Create security audit logging for sensitive operations",
+    "Update dependencies to fix security vulnerabilities",
+    "Implement session timeout for inactive users",
+    "Add CAPTCHA to login page to prevent automated attacks",
+    "Review and fix security issues in the API authentication",
+    "Encrypt data at rest in the database",
+    "Implement secure file upload validation"
+]
+
+FRAUD_TEMPLATES = [
+    "Implement fraud detection for suspicious transactions",
+    "Add transaction monitoring for unusual patterns",
+    "Create alerts for potential account takeover attempts",
+    "Develop a risk scoring system for new accounts",
+    "Implement IP geolocation verification for transactions",
+    "Add velocity checks for repeated actions",
+    "Create a fraud case management dashboard",
+    "Implement device fingerprinting for fraud prevention",
+    "Add behavioral biometrics to detect automated bots",
+    "Create rules engine for transaction validation",
+    "Implement verification steps for high-value transactions",
+    "Add machine learning model for anomaly detection",
+    "Create reporting for suspicious activities",
+    "Implement multi-layered fraud prevention strategy",
+    "Develop real-time fraud monitoring dashboard"
+]
+
+REGULAR_TEMPLATES = [
+    "As a user, I want to view my profile so that I can see my information",
+    "Implement search functionality for the products page",
+    "Add sorting options to the results list",
+    "Create a responsive design for mobile devices",
+    "Fix pagination bug in the dashboard",
+    "Update UI color scheme according to new brand guidelines",
+    "Add export to CSV functionality for reports",
+    "Implement email notifications for order updates",
+    "Create a user onboarding tutorial",
+    "Optimize database queries for better performance",
+    "Add filters to the product catalog",
+    "Implement a recommendation engine for products",
+    "Create a user feedback form",
+    "Add analytics tracking to key user actions",
+    "Implement social media sharing functionality"
+]
+
+# Description templates to expand on the summaries
+DESCRIPTION_TEMPLATES = [
+    "This user story is about {topic}. The implementation should include {detail1} and {detail2}.",
+    "We need to implement {topic} functionality. This should work by {detail1} and should consider {detail2}.",
+    "The system needs to provide {topic} capabilities. Implementation details include {detail1} and {detail2}.",
+    "This feature will enable {topic} for users. The development should include {detail1} and address {detail2}.",
+    "Implement {topic} functionality that provides {detail1} and handles {detail2} properly."
+]
+
+# Security and fraud related details
+SECURITY_DETAILS = [
+    "password hashing", "access controls", "input validation", "authentication tokens", 
+    "encryption methods", "security headers", "CSRF protection", "XSS prevention",
+    "secure cookies", "security testing", "vulnerability scanning", "penetration testing",
+    "security monitoring", "secure coding practices", "security patch management"
+]
+
+FRAUD_DETAILS = [
+    "transaction monitoring", "risk scoring", "fraud alerts", "anomaly detection", 
+    "verification steps", "account screening", "payment validation", "behavior analysis",
+    "fraud rules engine", "suspicious activity reporting", "real-time monitoring",
+    "fraud case management", "fraud prevention", "pattern recognition", "transaction limits"
+]
+
+REGULAR_DETAILS = [
+    "user interface", "database optimization", "responsive design", "user experience",
+    "performance testing", "error handling", "documentation", "accessibility",
+    "browser compatibility", "usability testing", "internationalization", "localization",
+    "logging", "configuration", "data migration", "caching strategies", "API design"
+]
+
+# Status options
+STATUSES = ["To Do", "In Progress", "In Review", "Done", "Backlog"]
+
+# Priority options
+PRIORITIES = ["Highest", "High", "Medium", "Low", "Lowest"]
+
+# Components
+COMPONENTS = ["Frontend", "Backend", "Database", "API", "UI", "Authentication", "Reporting", 
+             "Admin", "User Management", "Payments", "Security", "Infrastructure"]
+
+# Labels
+LABELS = ["enhancement", "bug", "feature", "technical-debt", "refactoring", "security", 
+         "performance", "UX", "documentation", "fraud", "compliance", "integration"]
+
+def generate_user_stories():
+    """Generate synthetic user stories with a mix of security, fraud, and regular stories."""
+    
+    user_stories = []
+    
+    # Generate start date for stories
+    base_date = datetime.now() - timedelta(days=180)
+    
+    for i in range(NUM_STORIES):
+        # Determine story type (with bias towards regular stories)
+        story_type = random.choices(
+            ["security", "fraud", "regular"], 
+            weights=[0.25, 0.25, 0.5], 
+            k=1
+        )[0]
+        
+        # Select project (with bias towards story type)
+        if story_type == "security":
+            project_key = random.choices(PROJECT_KEYS, weights=[0.1, 0.1, 0.1, 0.6, 0.1], k=1)[0]
+        elif story_type == "fraud":
+            project_key = random.choices(PROJECT_KEYS, weights=[0.1, 0.1, 0.1, 0.1, 0.6], k=1)[0]
+        else:
+            project_key = random.choices(PROJECT_KEYS, weights=[0.3, 0.3, 0.3, 0.05, 0.05], k=1)[0]
+        
+        # Generate story content based on type
+        if story_type == "security":
+            summary = random.choice(SECURITY_TEMPLATES)
+            topic = "security features"
+            detail1 = random.choice(SECURITY_DETAILS)
+            detail2 = random.choice(SECURITY_DETAILS)
+            has_security_keywords = True
+            has_fraud_keywords = random.random() < 0.2  # 20% chance of overlap
+        elif story_type == "fraud":
+            summary = random.choice(FRAUD_TEMPLATES)
+            topic = "fraud prevention"
+            detail1 = random.choice(FRAUD_DETAILS)
+            detail2 = random.choice(FRAUD_DETAILS)
+            has_security_keywords = random.random() < 0.3  # 30% chance of overlap
+            has_fraud_keywords = True
+        else:
+            summary = random.choice(REGULAR_TEMPLATES)
+            topic = "user functionality"
+            detail1 = random.choice(REGULAR_DETAILS)
+            detail2 = random.choice(REGULAR_DETAILS)
+            has_security_keywords = random.random() < 0.05  # 5% chance of false positive
+            has_fraud_keywords = random.random() < 0.05  # 5% chance of false positive
+        
+        # Generate description
+        description_template = random.choice(DESCRIPTION_TEMPLATES)
+        description = description_template.format(
+            topic=topic, 
+            detail1=detail1, 
+            detail2=detail2
+        )
+        
+        # Generate other fields
+        issue_key = f"{project_key}-{random.randint(100, 999)}"
+        created_date = base_date + timedelta(days=random.randint(0, 180))
+        status = random.choice(STATUSES)
+        assignee = f"user{random.randint(1, 10)}@example.com"
+        reporter = f"user{random.randint(1, 10)}@example.com"
+        priority = random.choice(PRIORITIES)
+        
+        # Generate components
+        num_components = random.randint(0, 3)
+        story_components = ", ".join(random.sample(COMPONENTS, num_components)) if num_components > 0 else ""
+        
+        # Generate labels
+        num_labels = random.randint(0, 4)
+        story_labels = ", ".join(random.sample(LABELS, num_labels)) if num_labels > 0 else ""
+        
+        # Add security/fraud labels based on story type
+        if story_type == "security" and "security" not in story_labels:
+            story_labels = "security, " + story_labels if story_labels else "security"
+        if story_type == "fraud" and "fraud" not in story_labels:
+            story_labels = "fraud, " + story_labels if story_labels else "fraud"
+        
+        # Create the combined text field
+        combined_text = f"{summary} {description}"
+        
+        # Count security and fraud keywords
+        from config.settings import SECURITY_KEYWORDS, FRAUD_KEYWORDS
+        
+        security_keyword_count = sum(1 for keyword in SECURITY_KEYWORDS if keyword.lower() in combined_text.lower())
+        fraud_keyword_count = sum(1 for keyword in FRAUD_KEYWORDS if keyword.lower() in combined_text.lower())
+        
+        # Create initial flags based on keywords
+        initial_security_flag = security_keyword_count > 0
+        initial_fraud_flag = fraud_keyword_count > 0
+        
+        # Add the story to our list
+        user_stories.append({
+            'project_key': project_key,
+            'issue_key': issue_key,
+            'summary': summary,
+            'description': description,
+            'status': status,
+            'created_date': created_date,
+            'assignee': assignee,
+            'reporter': reporter,
+            'priority': priority,
+            'labels': story_labels,
+            'components': story_components,
+            'combined_text': combined_text,
+            'security_keyword_count': security_keyword_count,
+            'fraud_keyword_count': fraud_keyword_count,
+            'has_security_keywords': has_security_keywords,
+            'has_fraud_keywords': has_fraud_keywords,
+            'initial_security_flag': initial_security_flag,
+            'initial_fraud_flag': initial_fraud_flag
+        })
+    
+    return pd.DataFrame(user_stories)
+
+def main():
+    """Create and save sample training data."""
+    try:
+        # Try to import the security and fraud keywords
+        try:
+            from config.settings import SECURITY_KEYWORDS, FRAUD_KEYWORDS
+        except ImportError:
+            # If can't import, define some basic keywords
+            global SECURITY_KEYWORDS, FRAUD_KEYWORDS
+            SECURITY_KEYWORDS = [
+                "authentication", "authorization", "encrypt", "decrypt", "security", 
+                "vulnerability", "exploit", "injection", "xss", "csrf", "attack", 
+                "breach", "hack", "malware", "phishing", "sensitive", "permission"
+            ]
+            FRAUD_KEYWORDS = [
+                "fraud", "scam", "suspicious", "anomaly", "detection", "prevention", 
+                "verification", "validation", "alert", "monitor", "transaction", 
+                "laundering", "compliance", "identity theft", "fake", "impersonation"
+            ]
+        
+        # Generate the data
+        df = generate_user_stories()
+        
+        # Create both raw and processed data files
+        raw_path = 'data/raw/sample_jira_user_stories.xlsx'
+        processed_path = 'data/processed/sample_processed_user_stories.xlsx'
+        
+        # Ensure directories exist
+        os.makedirs('data/processed', exist_ok=True)
+        
+        # Save the files
+        df.to_excel(raw_path, index=False)
+        df.to_excel(processed_path, index=False)
+        
+        print(f"Sample data created successfully!")
+        print(f"Raw data file: {os.path.abspath(raw_path)}")
+        print(f"Processed data file: {os.path.abspath(processed_path)}")
+        print(f"\nUse these files for training with:")
+        print(f"python main.py --train --input {os.path.abspath(processed_path)}")
+        
+    except Exception as e:
+        print(f"Error creating sample data: {e}")
+
+if __name__ == "__main__":
+    main()
