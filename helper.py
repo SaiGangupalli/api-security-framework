@@ -1,203 +1,3 @@
-# src/utils/helpers.py - Add this text cleaning function
-
-def clean_text(text):
-    """
-    Clean and normalize text data from Jira.
-    
-    Args:
-        text (str): Raw text input from Jira
-        
-    Returns:
-        str: Cleaned text
-    """
-    if not isinstance(text, str):
-        return ""
-    
-    # Replace HTML tags and entities
-    import re
-    
-    # Handle HTML tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    
-    # Handle common HTML entities
-    html_entities = {
-        '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', 
-        '&quot;': '"', '&#39;': "'", '&apos;': "'", '&#x2F;': '/',
-        '&#x27;': "'", '&#x2f;': '/'
-    }
-    for entity, replacement in html_entities.items():
-        text = text.replace(entity, replacement)
-    
-    # Handle Jira markup (basic)
-    jira_markup = {
-        '{code}': '', '{code:.*?}': '', '{noformat}': '', '{quote}': '"', 
-        '{color:.*?}': '', '{color}': '', '----': '-', '----': '-', 
-        '----': '-', '\\\\': '\n', '{panel}': '', '{panel:.*?}': '', 
-        '{panel}': '', '{table}': '', '{table:.*?}': '', '{table}': '',
-        '{column}': '', '{column:.*?}': '', '{column}': '',
-        '{section}': '', '{section:.*?}': '', '{section}': ''
-    }
-    for markup, replacement in jira_markup.items():
-        text = re.sub(markup, replacement, text)
-    
-    # Remove markdown formatting
-    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Bold
-    text = re.sub(r'\*(.*?)\*', r'\1', text)      # Italic
-    text = re.sub(r'__(.*?)__', r'\1', text)      # Underline
-    text = re.sub(r'~~(.*?)~~', r'\1', text)      # Strikethrough
-    text = re.sub(r'`(.*?)`', r'\1', text)        # Code
-    
-    # Remove special characters and control characters
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-    
-    # Replace multiple spaces, tabs, and newlines with single space
-    text = re.sub(r'[\s\t\n\r]+', ' ', text)
-    
-    # Remove URLs
-    text = re.sub(r'https?://\S+', '[URL]', text)
-    
-    # Remove leading/trailing whitespace
-    text = text.strip()
-    
-    return text
-
-
-
-# Add to src/data_processing/jira_connector.py
-
-from src.utils.helpers import clean_text
-
-# Add a text cleaning method to the JiraConnector class
-def clean_extracted_data(self, df):
-    """
-    Clean text data in the DataFrame.
-    
-    Args:
-        df (pandas.DataFrame): DataFrame with extracted Jira data
-        
-    Returns:
-        pandas.DataFrame: DataFrame with cleaned text
-    """
-    if df.empty:
-        return df
-    
-    logger.info("Cleaning extracted text data")
-    
-    # Clean text fields
-    text_columns = ['summary', 'description', 'labels', 'components']
-    for column in text_columns:
-        if column in df.columns:
-            logger.info(f"Cleaning text in column: {column}")
-            df[column] = df[column].apply(clean_text)
-    
-    logger.info("Text cleaning completed")
-    return df
-
-# Update the export_to_excel method to include text cleaning and formatting
-def export_to_excel(self, data, export_path=None):
-    """
-    Export user stories data to Excel with text cleaning and formatting.
-    
-    Args:
-        data (pandas.DataFrame): DataFrame containing user stories
-        export_path (str): Path to export the Excel file
-    
-    Returns:
-        str: Path to the exported Excel file
-    """
-    if data.empty:
-        logger.warning("No data to export.")
-        return None
-        
-    if export_path is None:
-        os.makedirs(RAW_DATA_PATH, exist_ok=True)
-        export_path = os.path.join(RAW_DATA_PATH, "jira_user_stories.xlsx")
-    
-    try:
-        # Clean the text data
-        data = self.clean_extracted_data(data)
-        
-        from src.utils.helpers import export_predictions_to_excel
-        
-        # Use the enhanced export function with formatting
-        export_path = export_predictions_to_excel(data, export_path)
-        
-        logger.info(f"Successfully exported {len(data)} records to {export_path}")
-        return export_path
-    except Exception as e:
-        logger.error(f"Failed to export data: {e}")
-        return None
-
-
-
-# Update src/data_processing/excel_processor.py
-
-from src.utils.helpers import clean_text
-
-# Update the preprocess_data method in the ExcelProcessor class
-def preprocess_data(self):
-    """Preprocess the data for ML analysis."""
-    if self.df is None:
-        if not self.load_data():
-            return False
-    
-    try:
-        # Clean text data first
-        logger.info("Cleaning text data")
-        text_columns = ['summary', 'description', 'labels', 'components']
-        for column in text_columns:
-            if column in self.df.columns:
-                self.df[column] = self.df[column].apply(clean_text)
-        
-        # Fill NaN values
-        self.df.fillna("", inplace=True)
-        
-        # Combine text fields for analysis
-        self.df['combined_text'] = self.df['summary'] + " " + self.df['description']
-        
-        # Clean text data
-        self.df['combined_text'] = self.df['combined_text'].str.lower()
-        
-        # Add initial keyword-based features
-        self._add_keyword_features()
-        
-        # Add date features
-        self.df['created_date'] = pd.to_datetime(self.df['created_date'])
-        self.df['created_year'] = self.df['created_date'].dt.year
-        self.df['created_month'] = self.df['created_date'].dt.month
-        self.df['created_day'] = self.df['created_date'].dt.day
-        
-        logger.info("Data preprocessing completed successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error during preprocessing: {e}")
-        return False
-
-# Update the save_processed_data method to use the enhanced Excel export
-def save_processed_data(self, output_path=None):
-    """Save the preprocessed data to an Excel file with formatting."""
-    if self.df is None:
-        logger.error("No data to save.")
-        return None
-    
-    if output_path is None:
-        os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
-        output_path = os.path.join(PROCESSED_DATA_PATH, "processed_user_stories.xlsx")
-    
-    try:
-        from src.utils.helpers import export_predictions_to_excel
-        
-        # Use the enhanced export function with formatting
-        output_path = export_predictions_to_excel(self.df, output_path)
-        
-        logger.info(f"Preprocessed data saved to {output_path}")
-        return output_path
-    except Exception as e:
-        logger.error(f"Failed to save preprocessed data: {e}")
-        return None
-
-
-
 # src/utils/helpers.py - Updated export_predictions_to_excel function that works with raw data too
 
 def export_predictions_to_excel(df, output_path):
@@ -386,3 +186,141 @@ def export_predictions_to_excel(df, output_path):
     except Exception as e:
         logger.error(f"Failed to export data: {e}")
         return None
+
+
+
+# Update this part in src/model_training/training.py within the predict_on_new_data method
+
+def predict_on_new_data(self, new_data):
+    """
+    Make predictions on new data.
+    
+    Args:
+        new_data (pandas.DataFrame): New data to predict on
+        
+    Returns:
+        pandas.DataFrame: Data with prediction results
+    """
+    # Load the model and vectorizer if not already loaded
+    if self.model.model_security is None or self.model.vectorizer is None:
+        logger.info("Loading saved model and vectorizer")
+        self.model.load_model()
+        self.model.load_vectorizer()
+    
+    # Extract features using the saved vectorizer
+    X, _ = self.feature_engineer.extract_features(new_data, vectorizer=self.model.vectorizer, fit=False)
+    
+    # Make predictions
+    predictions = self.model.predict(X)
+    
+    # Add prediction results to the data
+    result_df = new_data.copy()
+    result_df['security_prediction'] = predictions['security_prediction']
+    result_df['security_probability'] = predictions['security_probability']
+    result_df['fraud_prediction'] = predictions['fraud_prediction']
+    result_df['fraud_probability'] = predictions['fraud_probability']
+    
+    # Add prediction explanation columns if matching keywords are available
+    if 'security_matching_keywords' in result_df.columns:
+        # Add a column that shows matched keywords only for positive predictions
+        result_df['security_matches'] = result_df.apply(
+            lambda row: row['security_matching_keywords'] if row['security_prediction'] == 1 else "",
+            axis=1
+        )
+    
+    if 'fraud_matching_keywords' in result_df.columns:
+        # Add a column that shows matched keywords only for positive predictions
+        result_df['fraud_matches'] = result_df.apply(
+            lambda row: row['fraud_matching_keywords'] if row['fraud_prediction'] == 1 else "",
+            axis=1
+        )
+    
+    # Add explanation column
+    result_df['prediction_explanation'] = result_df.apply(
+        lambda row: self._get_prediction_explanation(row), 
+        axis=1
+    )
+    
+    return result_df
+
+# Add this helper method to the ModelTrainer class
+def _get_prediction_explanation(self, row):
+    """Generate a human-readable explanation for the prediction."""
+    explanation = []
+    
+    # Add security explanation if predicted as security issue
+    if row['security_prediction'] == 1:
+        if 'security_matching_keywords' in row and row['security_matching_keywords']:
+            explanation.append(f"Security risk detected (probability: {row['security_probability']:.2f}) "
+                               f"with keywords: {row['security_matching_keywords']}")
+        else:
+            explanation.append(f"Security risk detected (probability: {row['security_probability']:.2f})")
+    
+    # Add fraud explanation if predicted as fraud issue
+    if row['fraud_prediction'] == 1:
+        if 'fraud_matching_keywords' in row and row['fraud_matching_keywords']:
+            explanation.append(f"Fraud risk detected (probability: {row['fraud_probability']:.2f}) "
+                              f"with keywords: {row['fraud_matching_keywords']}")
+        else:
+            explanation.append(f"Fraud risk detected (probability: {row['fraud_probability']:.2f})")
+    
+    # If no risks detected
+    if not explanation:
+        explanation.append("No security or fraud risks detected")
+    
+    return "\n".join(explanation)
+
+
+
+
+
+
+# Update this part in the export_predictions_to_excel function in src/utils/helpers.py
+
+# Add these columns to the column_widths dictionary:
+column_widths = {
+    'project_key': 10,
+    'issue_key': 15,
+    'summary': 40,
+    'description': 60,
+    'status': 12,
+    'created_date': 18,
+    'assignee': 20,
+    'reporter': 20,
+    'priority': 10,
+    'labels': 25,
+    'components': 25,
+    'impact_label': 20,
+    'security_prediction': 15,
+    'security_probability': 15,
+    'security_matches': 30,
+    'fraud_prediction': 15,
+    'fraud_probability': 15,
+    'fraud_matches': 30,
+    'prediction_explanation': 60
+}
+
+# Also, add this code to ensure text wrapping is applied to the explanation and matches columns:
+
+# Find indices for explanation and matches columns
+explanation_idx = df.columns.get_loc('prediction_explanation') + 1 if 'prediction_explanation' in df.columns else None
+security_matches_idx = df.columns.get_loc('security_matches') + 1 if 'security_matches' in df.columns else None
+fraud_matches_idx = df.columns.get_loc('fraud_matches') + 1 if 'fraud_matches' in df.columns else None
+
+# In the cell formatting loop, add:
+if explanation_idx:
+    explanation_cell = worksheet.cell(row=row_idx, column=explanation_idx)
+    explanation_cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+if security_matches_idx:
+    security_matches_cell = worksheet.cell(row=row_idx, column=security_matches_idx)
+    security_matches_cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+if fraud_matches_idx:
+    fraud_matches_cell = worksheet.cell(row=row_idx, column=fraud_matches_idx)
+    fraud_matches_cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+
+
+
+
