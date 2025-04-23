@@ -230,3 +230,45 @@ def update_keyword_lists(feature_importances, threshold=0.01):
     logger.info(f"Updated fraud keywords: {len(updated_fraud_keywords)} keywords")
     
     return updated_security_keywords, updated_fraud_keywords
+
+
+def generate_feedback_template(predictions_df, output_path):
+    """
+    Generate a feedback template for manual review.
+    
+    Args:
+        predictions_df (pandas.DataFrame): DataFrame with predictions
+        output_path (str): Path to save the template
+        
+    Returns:
+        str: Path to the feedback template
+    """
+    # Create a copy of the DataFrame with only the necessary columns
+    template_df = predictions_df[['project_key', 'issue_key', 'summary', 
+                                  'security_prediction', 'security_probability',
+                                  'fraud_prediction', 'fraud_probability']].copy()
+    
+    # Add columns for manual verification
+    template_df['security_verified'] = ""
+    template_df['fraud_verified'] = ""
+    template_df['notes'] = ""
+    
+    # Focus on issues with higher probability or conflicting predictions
+    # Fix the ambiguous comparison
+    template_df['needs_review'] = (
+        (template_df['security_probability'] > 0.3) | 
+        (template_df['fraud_probability'] > 0.3) |
+        # Fix the comparison between prediction and probability
+        ((template_df['security_prediction'] == 1) & (template_df['security_probability'] < 0.3)) |
+        ((template_df['security_prediction'] == 0) & (template_df['security_probability'] > 0.3)) |
+        ((template_df['fraud_prediction'] == 1) & (template_df['fraud_probability'] < 0.3)) |
+        ((template_df['fraud_prediction'] == 0) & (template_df['fraud_probability'] > 0.3))
+    )
+    
+    try:
+        template_df.to_excel(output_path, index=False)
+        logger.info(f"Feedback template saved to {output_path}")
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to create feedback template: {e}")
+        return None
