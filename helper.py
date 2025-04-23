@@ -1,191 +1,66 @@
-# src/utils/helpers.py - Updated export_predictions_to_excel function that works with raw data too
+# Add this function to src/data_processing/excel_processor.py
 
-def export_predictions_to_excel(df, output_path):
+def _find_matching_keywords(self, text, keyword_list):
     """
-    Export data to Excel with improved formatting.
-    Works with both raw Jira data and prediction results.
+    Find which keywords from the list match in the text.
     
     Args:
-        df (pandas.DataFrame): DataFrame with data
-        output_path (str): Path to save the Excel file
+        text (str): Text to search in
+        keyword_list (list): List of keywords to search for
         
     Returns:
-        str: Path to the exported Excel file
+        tuple: (matching_keywords, count)
     """
-    try:
-        # Clean up text fields by removing extra spaces
-        text_columns = ['summary', 'description', 'combined_text']
-        for col in text_columns:
-            if col in df.columns:
-                # Replace multiple spaces with single space
-                df[col] = df[col].astype(str).str.replace(r'\s+', ' ', regex=True)
-                # Strip leading/trailing whitespace
-                df[col] = df[col].str.strip()
-        
-        # Check if this is prediction data or raw data
-        is_prediction_data = all(col in df.columns for col in ['security_prediction', 'fraud_prediction'])
-        
-        # If it's prediction data, add an impact label
-        if is_prediction_data:
-            df['impact_label'] = 'No Impact'
-            # If either security or fraud impact exists, mark as 'Security/Fraud Impact'
-            df.loc[(df['security_prediction'] == 1) | (df['fraud_prediction'] == 1), 'impact_label'] = 'Security/Fraud Impact'
-            # More specific labels
-            df.loc[(df['security_prediction'] == 1) & (df['fraud_prediction'] == 0), 'impact_label'] = 'Security Impact'
-            df.loc[(df['security_prediction'] == 0) & (df['fraud_prediction'] == 1), 'impact_label'] = 'Fraud Impact'
-            df.loc[(df['security_prediction'] == 1) & (df['fraud_prediction'] == 1), 'impact_label'] = 'Security & Fraud Impact'
-        
-        # Create a Pandas Excel writer using openpyxl
-        writer = pd.ExcelWriter(output_path, engine='openpyxl')
-        
-        # Convert DataFrame to Excel
-        sheet_name = 'Predictions' if is_prediction_data else 'Jira Stories'
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        # Get the workbook and worksheet objects
-        workbook = writer.book
-        worksheet = writer.sheets[sheet_name]
-        
-        # Define column widths
-        column_widths = {
-            'project_key': 10,
-            'issue_key': 15,
-            'summary': 40,
-            'description': 60,
-            'status': 12,
-            'created_date': 18,
-            'assignee': 20,
-            'reporter': 20,
-            'priority': 10,
-            'labels': 25,
-            'components': 25,
-            'impact_label': 20,
-            'security_prediction': 15,
-            'security_probability': 15,
-            'fraud_prediction': 15,
-            'fraud_probability': 15
-        }
-        
-        # Apply column widths
-        for col_name, width in column_widths.items():
-            if col_name in df.columns:
-                col_idx = df.columns.get_loc(col_name) + 1
-                col_letter = get_column_letter(col_idx)
-                worksheet.column_dimensions[col_letter].width = width
-        
-        # Get column indices for text columns
-        summary_idx = df.columns.get_loc('summary') + 1 if 'summary' in df.columns else None
-        desc_idx = df.columns.get_loc('description') + 1 if 'description' in df.columns else None
-        
-        # Apply formatting to all cells
-        for row_idx in range(2, len(df) + 2):  # +2 for header and 1-based indexing
-            # Apply text wrapping to summary and description
-            if summary_idx:
-                cell = worksheet.cell(row=row_idx, column=summary_idx)
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
-            
-            if desc_idx:
-                cell = worksheet.cell(row=row_idx, column=desc_idx)
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
-        
-            # Format impact label if present
-            if is_prediction_data:
-                impact_col_idx = df.columns.get_loc('impact_label') + 1
-                impact_cell = worksheet.cell(row=row_idx, column=impact_col_idx)
-                impact_text = impact_cell.value
-                
-                # Apply conditional formatting to impact label
-                if impact_text == 'Security & Fraud Impact':
-                    impact_cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # Red
-                    impact_cell.font = Font(color="FFFFFF", bold=True)  # White bold text
-                elif impact_text == 'Security Impact':
-                    impact_cell.fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")  # Orange
-                    impact_cell.font = Font(bold=True)
-                elif impact_text == 'Fraud Impact':
-                    impact_cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow
-                    impact_cell.font = Font(bold=True)
-                
-                # Format probability cells with gradient coloring based on value if present
-                if 'security_probability' in df.columns:
-                    security_prob_idx = df.columns.get_loc('security_probability') + 1
-                    sec_prob_cell = worksheet.cell(row=row_idx, column=security_prob_idx)
-                    if isinstance(sec_prob_cell.value, (int, float)) and 0 <= sec_prob_cell.value <= 1:
-                        intensity = int(255 - (sec_prob_cell.value * 255))
-                        color = f"{intensity:02X}{255:02X}{intensity:02X}"  # Green gradient
-                        sec_prob_cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
-                
-                if 'fraud_probability' in df.columns:
-                    fraud_prob_idx = df.columns.get_loc('fraud_probability') + 1
-                    fraud_prob_cell = worksheet.cell(row=row_idx, column=fraud_prob_idx)
-                    if isinstance(fraud_prob_cell.value, (int, float)) and 0 <= fraud_prob_cell.value <= 1:
-                        intensity = int(255 - (fraud_prob_cell.value * 255))
-                        color = f"{intensity:02X}{intensity:02X}{255:02X}"  # Blue gradient
-                        fraud_prob_cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
-        
-        # Format header row
-        for col_idx in range(1, len(df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col_idx)
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
-            cell.alignment = Alignment(horizontal='center')
-        
-        # Add borders to all cells
-        thin_border = Border(
-            left=Side(style='thin'), 
-            right=Side(style='thin'), 
-            top=Side(style='thin'), 
-            bottom=Side(style='thin')
-        )
-        
-        for row in worksheet.iter_rows(min_row=1, max_row=len(df) + 1, min_col=1, max_col=len(df.columns)):
-            for cell in row:
-                cell.border = thin_border
-        
-        # Apply auto-filter to header row
-        worksheet.auto_filter.ref = f"A1:{get_column_letter(len(df.columns))}{len(df) + 1}"
-        
-        # Freeze the header row
-        worksheet.freeze_panes = 'A2'
-        
-        # Create a summary sheet if this is prediction data
-        if is_prediction_data:
-            summary_sheet = workbook.create_sheet("Summary")
-            
-            # Add summary statistics
-            summary_data = [
-                ["Jira User Stories Security & Fraud Analysis Summary"],
-                [""],
-                ["Total user stories analyzed:", len(df)],
-                ["Stories with Security Impact:", df['security_prediction'].sum()],
-                ["Stories with Fraud Impact:", df['fraud_prediction'].sum()],
-                ["Stories with both Security & Fraud Impact:", ((df['security_prediction'] == 1) & (df['fraud_prediction'] == 1)).sum()],
-                ["Stories with Security or Fraud Impact:", ((df['security_prediction'] == 1) | (df['fraud_prediction'] == 1)).sum()],
-                [""],
-                ["Analysis Date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-            ]
-            
-            for i, row_data in enumerate(summary_data, 1):
-                for j, value in enumerate(row_data, 1):
-                    cell = summary_sheet.cell(row=i, column=j, value=value)
-                    if i == 1:  # Title
-                        cell.font = Font(size=14, bold=True)
-                        summary_sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
-                        cell.alignment = Alignment(horizontal='center')
-                    
-                    if j == 1 and i > 2:  # Left column headers
-                        cell.font = Font(bold=True)
-            
-            # Adjust column widths in summary sheet
-            summary_sheet.column_dimensions['A'].width = 40
-            summary_sheet.column_dimensions['B'].width = 15
-        
-        # Save the workbook
-        writer.close()
-        logger.info(f"Data exported to {output_path} with formatting")
-        return output_path
-    except Exception as e:
-        logger.error(f"Failed to export data: {e}")
-        return None
+    if not isinstance(text, str):
+        return [], 0
+    
+    # Convert to lowercase for case-insensitive matching
+    text = text.lower()
+    
+    # Find all matching keywords
+    matching_keywords = []
+    for keyword in keyword_list:
+        if keyword.lower() in text:
+            matching_keywords.append(keyword)
+    
+    return matching_keywords, len(matching_keywords)
+
+# Update the _add_keyword_features method in ExcelProcessor class
+def _add_keyword_features(self):
+    """Add keyword-based features using the predefined security and fraud keywords."""
+    from config.settings import SECURITY_KEYWORDS, FRAUD_KEYWORDS
+    
+    # Find matching security keywords and their count
+    self.df['security_matching_keywords'] = self.df['combined_text'].apply(
+        lambda x: ', '.join(self._find_matching_keywords(x, SECURITY_KEYWORDS)[0])
+    )
+    
+    # Count security keywords
+    self.df['security_keyword_count'] = self.df['combined_text'].apply(
+        lambda x: self._find_matching_keywords(x, SECURITY_KEYWORDS)[1]
+    )
+    
+    # Find matching fraud keywords and their count
+    self.df['fraud_matching_keywords'] = self.df['combined_text'].apply(
+        lambda x: ', '.join(self._find_matching_keywords(x, FRAUD_KEYWORDS)[0])
+    )
+    
+    # Count fraud keywords
+    self.df['fraud_keyword_count'] = self.df['combined_text'].apply(
+        lambda x: self._find_matching_keywords(x, FRAUD_KEYWORDS)[1]
+    )
+    
+    # Flag if any keywords are present
+    self.df['has_security_keywords'] = self.df['security_keyword_count'] > 0
+    self.df['has_fraud_keywords'] = self.df['fraud_keyword_count'] > 0
+    
+    # Initial labels based purely on keywords - to be refined by ML model
+    self.df['initial_security_flag'] = self.df['has_security_keywords']
+    self.df['initial_fraud_flag'] = self.df['has_fraud_keywords']
+    
+    logger.info("Added keyword-based features with matching keywords listed")
+
+
 
 
 
@@ -274,7 +149,6 @@ def _get_prediction_explanation(self, row):
 
 
 
-
 # Update this part in the export_predictions_to_excel function in src/utils/helpers.py
 
 # Add these columns to the column_widths dictionary:
@@ -319,8 +193,5 @@ if security_matches_idx:
 if fraud_matches_idx:
     fraud_matches_cell = worksheet.cell(row=row_idx, column=fraud_matches_idx)
     fraud_matches_cell.alignment = Alignment(wrap_text=True, vertical='top')
-
-
-
 
 
