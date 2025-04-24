@@ -1,262 +1,477 @@
-# Enhanced keyword matching function for src/data_processing/excel_processor.py
+# src/utils/helpers.py - Updated export_predictions_to_excel function with column filtering
 
-def _find_matching_keywords(self, text, keyword_list):
+def export_predictions_to_excel(df, output_path, exclude_columns=None, hidden_columns=None):
     """
-    Find which keywords from the list match in the text,
-    including similar words and variations.
+    Export data to Excel with improved formatting.
+    Works with both raw Jira data and prediction results.
+    Allows excluding or hiding specific columns.
     
     Args:
-        text (str): Text to search in
-        keyword_list (list): List of keywords to search for
+        df (pandas.DataFrame): DataFrame with data
+        output_path (str): Path to save the Excel file
+        exclude_columns (list): Columns to exclude completely from the output
+        hidden_columns (list): Columns to include but hide in Excel
         
     Returns:
-        tuple: (matching_keywords, count)
+        str: Path to the exported Excel file
     """
-    if not isinstance(text, str) or not text:
-        return [], 0
-    
-    # Convert to lowercase for case-insensitive matching
-    text = text.lower()
-    
-    # Tokenize the text
     try:
-        from nltk.tokenize import word_tokenize
-        tokens = word_tokenize(text)
-    except:
-        # Simple tokenization as fallback
-        tokens = text.split()
-    
-    # Try to lemmatize tokens (if possible)
-    try:
-        from nltk.stem import WordNetLemmatizer
-        lemmatizer = WordNetLemmatizer()
-        lemmatized_tokens = [lemmatizer.lemmatize(token) for token in tokens]
-    except:
-        # Use tokens as is if lemmatization fails
-        lemmatized_tokens = tokens
-    
-    # Create stems for fuzzy matching
-    try:
-        from nltk.stem.porter import PorterStemmer
-        stemmer = PorterStemmer()
-        stems = [stemmer.stem(token) for token in tokens]
-    except:
-        # No stemming if it fails
-        stems = []
-    
-    # Find all matching keywords (direct matches)
-    matching_keywords = []
-    matched_indices = set()  # To avoid duplicate matches
-    
-    # 1. Direct substring matching (original method)
-    for i, keyword in enumerate(keyword_list):
-        if i in matched_indices:
-            continue
-            
-        keyword_lower = keyword.lower()
-        if keyword_lower in text:
-            matching_keywords.append(keyword)
-            matched_indices.add(i)
-    
-    # 2. Token-level exact matching
-    for i, keyword in enumerate(keyword_list):
-        if i in matched_indices:
-            continue
-            
-        # Handle multi-word keywords
-        keyword_tokens = keyword.lower().split()
+        # Set default values for column lists if None
+        exclude_columns = exclude_columns or []
+        hidden_columns = hidden_columns or []
         
-        # Check if all tokens in the keyword appear in the text tokens
-        if all(kt in tokens for kt in keyword_tokens):
-            matching_keywords.append(keyword)
-            matched_indices.add(i)
-    
-    # 3. Lemma matching (finds "encrypt" when searching for "encryption")
-    try:
-        lemmatizer = WordNetLemmatizer()
-        for i, keyword in enumerate(keyword_list):
-            if i in matched_indices:
-                continue
-                
-            # Get lemmas for the keyword
-            keyword_tokens = keyword.lower().split()
-            keyword_lemmas = [lemmatizer.lemmatize(kt) for kt in keyword_tokens]
-            
-            # Check if any lemmatized token matches keyword lemmas
-            if any(kl in lemmatized_tokens for kl in keyword_lemmas):
-                matching_keywords.append(keyword)
-                matched_indices.add(i)
-    except:
-        # Skip lemma matching if NLTK is not available
-        pass
-    
-    # 4. Stem matching (captures more variations)
-    try:
-        stemmer = PorterStemmer()
-        for i, keyword in enumerate(keyword_list):
-            if i in matched_indices:
-                continue
-                
-            # Get stems for the keyword
-            keyword_tokens = keyword.lower().split()
-            keyword_stems = [stemmer.stem(kt) for kt in keyword_tokens]
-            
-            # Check if any stem matches keyword stems
-            if any(ks in stems for ks in keyword_stems):
-                matching_keywords.append(keyword)
-                matched_indices.add(i)
-    except:
-        # Skip stem matching if NLTK is not available
-        pass
-    
-    # 5. Simple fuzzy matching (allows for minor typos/variations)
-    try:
-        from difflib import SequenceMatcher
+        # Clean up text fields by removing extra spaces
+        text_columns = ['summary', 'description', 'combined_text']
+        for col in text_columns:
+            if col in df.columns:
+                # Replace multiple spaces with single space
+                df[col] = df[col].astype(str).str.replace(r'\s+', ' ', regex=True)
+                # Strip leading/trailing whitespace
+                df[col] = df[col].str.strip()
         
-        for i, keyword in enumerate(keyword_list):
-            if i in matched_indices:
-                continue
-                
-            keyword_lower = keyword.lower()
-            
-            # Check similarity with tokens
-            for token in tokens:
-                if len(token) > 3 and len(keyword_lower) > 3:  # Only meaningful words
-                    similarity = SequenceMatcher(None, token, keyword_lower).ratio()
-                    if similarity > 0.85:  # High similarity threshold
-                        matching_keywords.append(f"{keyword} (similar to '{token}')")
-                        matched_indices.add(i)
-                        break
-    except:
-        # Skip fuzzy matching if it fails
-        pass
-    
-    return matching_keywords, len(matching_keywords)
-
-
-
-
-
-# Add this to config/settings.py
-
-# Keyword synonyms for expanded matching
-SECURITY_KEYWORD_SYNONYMS = {
-    "authentication": ["auth", "login", "signin", "sign-in", "credentials", "authenticate"],
-    "authorization": ["authz", "permissions", "access control", "privilege"],
-    "encrypt": ["encryption", "encrypted", "cipher", "crypto"],
-    "decrypt": ["decryption", "decrypted", "decipher"],
-    "password": ["passwd", "pwd", "passphrase", "credentials"],
-    "vulnerability": ["vuln", "weakness", "exploit", "flaw", "bug"],
-    "injection": ["sql injection", "xss", "code injection", "script injection"],
-    "malware": ["virus", "trojan", "spyware", "ransomware", "malicious code"],
-    "phishing": ["spoofing", "social engineering", "fake login"],
-    "firewall": ["fw", "waf", "filtering", "network security"],
-    "certificate": ["cert", "ssl", "tls", "x509"]
-}
-
-FRAUD_KEYWORD_SYNONYMS = {
-    "fraud": ["fraudulent", "scam", "deceptive", "illicit"],
-    "suspicious": ["suspect", "questionable", "doubtful", "unusual"],
-    "anomaly": ["abnormal", "outlier", "irregular", "deviation"],
-    "detection": ["detect", "identify", "discover", "flag"],
-    "prevention": ["prevent", "avoid", "mitigate", "block"],
-    "verification": ["verify", "validate", "confirm", "check"],
-    "monitoring": ["monitor", "surveillance", "tracking", "observing"],
-    "transaction": ["payment", "transfer", "purchase", "activity"],
-    "alert": ["alarm", "notification", "warning", "flag"],
-    "unauthorized": ["illegal", "illicit", "prohibited", "not permitted"]
-}
-
-# Function to expand keyword lists with synonyms
-def expand_keyword_list(keyword_list, synonym_map):
-    """
-    Expand a keyword list by adding synonyms.
-    
-    Args:
-        keyword_list (list): Original keyword list
-        synonym_map (dict): Dictionary mapping keywords to their synonyms
+        # Check if this is prediction data or raw data
+        is_prediction_data = all(col in df.columns for col in ['security_prediction', 'fraud_prediction'])
         
-    Returns:
-        list: Expanded keyword list with synonyms
-    """
-    expanded_list = keyword_list.copy()
-    
-    # Add synonyms for keywords that have them
-    for keyword in keyword_list:
-        if keyword in synonym_map:
-            expanded_list.extend(synonym_map[keyword])
-    
-    # Remove duplicates and return
-    return list(set(expanded_list))
-
-# Expand the keyword lists with synonyms
-EXPANDED_SECURITY_KEYWORDS = expand_keyword_list(SECURITY_KEYWORDS, SECURITY_KEYWORD_SYNONYMS)
-EXPANDED_FRAUD_KEYWORDS = expand_keyword_list(FRAUD_KEYWORDS, FRAUD_KEYWORD_SYNONYMS)
-
-
-
-
-
-
-# Update this in src/data_processing/excel_processor.py - _add_keyword_features method
-
-def _add_keyword_features(self):
-    """Add keyword-based features using the predefined security and fraud keywords with similar word matching."""
-    try:
-        # Try to import expanded keyword lists first
-        from config.settings import (
-            EXPANDED_SECURITY_KEYWORDS, 
-            EXPANDED_FRAUD_KEYWORDS,
-            SECURITY_KEYWORDS,
-            FRAUD_KEYWORDS
+        # If it's prediction data, add an impact label
+        if is_prediction_data:
+            df['impact_label'] = 'No Impact'
+            # If either security or fraud impact exists, mark as 'Security/Fraud Impact'
+            df.loc[(df['security_prediction'] == 1) | (df['fraud_prediction'] == 1), 'impact_label'] = 'Security/Fraud Impact'
+            # More specific labels
+            df.loc[(df['security_prediction'] == 1) & (df['fraud_prediction'] == 0), 'impact_label'] = 'Security Impact'
+            df.loc[(df['security_prediction'] == 0) & (df['fraud_prediction'] == 1), 'impact_label'] = 'Fraud Impact'
+            df.loc[(df['security_prediction'] == 1) & (df['fraud_prediction'] == 1), 'impact_label'] = 'Security & Fraud Impact'
+        
+        # Create a copy of the dataframe excluding specified columns
+        filtered_df = df.drop(columns=[col for col in exclude_columns if col in df.columns])
+        
+        # Create a Pandas Excel writer using openpyxl
+        writer = pd.ExcelWriter(output_path, engine='openpyxl')
+        
+        # Convert DataFrame to Excel
+        sheet_name = 'Predictions' if is_prediction_data else 'Jira Stories'
+        filtered_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        # Get the workbook and worksheet objects
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+        
+        # Define column widths
+        column_widths = {
+            'project_key': 10,
+            'issue_key': 15,
+            'summary': 40,
+            'description': 60,
+            'status': 12,
+            'created_date': 18,
+            'assignee': 20,
+            'reporter': 20,
+            'priority': 10,
+            'labels': 25,
+            'components': 25,
+            'impact_label': 20,
+            'security_prediction': 15,
+            'security_probability': 15,
+            'security_matches': 30,
+            'fraud_prediction': 15,
+            'fraud_probability': 15,
+            'fraud_matches': 30,
+            'prediction_explanation': 60
+        }
+        
+        # Apply column widths and hide columns as needed
+        for col_idx, col_name in enumerate(filtered_df.columns, 1):
+            col_letter = get_column_letter(col_idx)
+            
+            # Apply width if defined
+            if col_name in column_widths:
+                worksheet.column_dimensions[col_letter].width = column_widths[col_name]
+            
+            # Hide column if in hidden_columns list
+            if col_name in hidden_columns:
+                worksheet.column_dimensions[col_letter].hidden = True
+        
+        # Get indices for specific columns
+        summary_idx = filtered_df.columns.get_loc('summary') + 1 if 'summary' in filtered_df.columns else None
+        desc_idx = filtered_df.columns.get_loc('description') + 1 if 'description' in filtered_df.columns else None
+        explanation_idx = filtered_df.columns.get_loc('prediction_explanation') + 1 if 'prediction_explanation' in filtered_df.columns else None
+        security_matches_idx = filtered_df.columns.get_loc('security_matches') + 1 if 'security_matches' in filtered_df.columns else None
+        fraud_matches_idx = filtered_df.columns.get_loc('fraud_matches') + 1 if 'fraud_matches' in filtered_df.columns else None
+        
+        # Apply formatting to all cells
+        for row_idx in range(2, len(filtered_df) + 2):  # +2 for header and 1-based indexing
+            # Apply vertical alignment to ALL cells
+            for col_idx in range(1, len(filtered_df.columns) + 1):
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                cell.alignment = Alignment(vertical='top')
+            
+            # Add text wrapping for text columns
+            for idx in [summary_idx, desc_idx, explanation_idx, security_matches_idx, fraud_matches_idx]:
+                if idx:
+                    cell = worksheet.cell(row=row_idx, column=idx)
+                    cell.alignment = Alignment(wrap_text=True, vertical='top')
+            
+            # Format impact label if present
+            if is_prediction_data and 'impact_label' in filtered_df.columns:
+                impact_col_idx = filtered_df.columns.get_loc('impact_label') + 1
+                impact_cell = worksheet.cell(row=row_idx, column=impact_col_idx)
+                impact_text = impact_cell.value
+                
+                # Apply conditional formatting to impact label
+                if impact_text == 'Security & Fraud Impact':
+                    impact_cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # Red
+                    impact_cell.font = Font(color="FFFFFF", bold=True)  # White bold text
+                elif impact_text == 'Security Impact':
+                    impact_cell.fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")  # Orange
+                    impact_cell.font = Font(bold=True)
+                elif impact_text == 'Fraud Impact':
+                    impact_cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow
+                    impact_cell.font = Font(bold=True)
+            
+            # Format probability cells with gradient coloring based on value if present
+            if 'security_probability' in filtered_df.columns:
+                security_prob_idx = filtered_df.columns.get_loc('security_probability') + 1
+                sec_prob_cell = worksheet.cell(row=row_idx, column=security_prob_idx)
+                if isinstance(sec_prob_cell.value, (int, float)) and 0 <= sec_prob_cell.value <= 1:
+                    intensity = int(255 - (sec_prob_cell.value * 255))
+                    color = f"{intensity:02X}{255:02X}{intensity:02X}"  # Green gradient
+                    sec_prob_cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+            
+            if 'fraud_probability' in filtered_df.columns:
+                fraud_prob_idx = filtered_df.columns.get_loc('fraud_probability') + 1
+                fraud_prob_cell = worksheet.cell(row=row_idx, column=fraud_prob_idx)
+                if isinstance(fraud_prob_cell.value, (int, float)) and 0 <= fraud_prob_cell.value <= 1:
+                    intensity = int(255 - (fraud_prob_cell.value * 255))
+                    color = f"{intensity:02X}{intensity:02X}{255:02X}"  # Blue gradient
+                    fraud_prob_cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+        
+        # Format header row
+        for col_idx in range(1, len(filtered_df.columns) + 1):
+            cell = worksheet.cell(row=1, column=col_idx)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Add borders to all cells
+        thin_border = Border(
+            left=Side(style='thin'), 
+            right=Side(style='thin'), 
+            top=Side(style='thin'), 
+            bottom=Side(style='thin')
         )
         
-        # Use expanded lists if available
-        security_keywords = EXPANDED_SECURITY_KEYWORDS
-        fraud_keywords = EXPANDED_FRAUD_KEYWORDS
-        logger.info(f"Using expanded keyword lists: {len(security_keywords)} security keywords, {len(fraud_keywords)} fraud keywords")
-    except ImportError:
-        # Fall back to regular keyword lists
-        from config.settings import SECURITY_KEYWORDS, FRAUD_KEYWORDS
-        security_keywords = SECURITY_KEYWORDS
-        fraud_keywords = FRAUD_KEYWORDS
-        logger.info(f"Using standard keyword lists: {len(security_keywords)} security keywords, {len(fraud_keywords)} fraud keywords")
+        for row in worksheet.iter_rows(min_row=1, max_row=len(filtered_df) + 1, min_col=1, max_col=len(filtered_df.columns)):
+            for cell in row:
+                cell.border = thin_border
+        
+        # Apply auto-filter to header row
+        worksheet.auto_filter.ref = f"A1:{get_column_letter(len(filtered_df.columns))}{len(filtered_df) + 1}"
+        
+        # Freeze the header row
+        worksheet.freeze_panes = 'A2'
+        
+        # Create a summary sheet if this is prediction data
+        if is_prediction_data:
+            summary_sheet = workbook.create_sheet("Summary")
+            
+            # Add summary statistics
+            summary_data = [
+                ["Jira User Stories Security & Fraud Analysis Summary"],
+                [""],
+                ["Total user stories analyzed:", len(df)],
+                ["Stories with Security Impact:", df['security_prediction'].sum()],
+                ["Stories with Fraud Impact:", df['fraud_prediction'].sum()],
+                ["Stories with both Security & Fraud Impact:", ((df['security_prediction'] == 1) & (df['fraud_prediction'] == 1)).sum()],
+                ["Stories with Security or Fraud Impact:", ((df['security_prediction'] == 1) | (df['fraud_prediction'] == 1)).sum()],
+                [""],
+                ["Analysis Date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+            ]
+            
+            for i, row_data in enumerate(summary_data, 1):
+                for j, value in enumerate(row_data, 1):
+                    cell = summary_sheet.cell(row=i, column=j, value=value)
+                    if i == 1:  # Title
+                        cell.font = Font(size=14, bold=True)
+                        summary_sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+                        cell.alignment = Alignment(horizontal='center')
+                    
+                    if j == 1 and i > 2:  # Left column headers
+                        cell.font = Font(bold=True)
+            
+            # Adjust column widths in summary sheet
+            summary_sheet.column_dimensions['A'].width = 40
+            summary_sheet.column_dimensions['B'].width = 15
+        
+        # Save the workbook
+        writer.close()
+        logger.info(f"Data exported to {output_path} with formatting")
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to export data: {e}")
+        return None
+
+
+
+
+
+# Update the predict_and_analyze function in main.py
+
+def predict_and_analyze(model_trainer, input_data, nltk_data_path=None, exclude_columns=None, hidden_columns=None):
+    """
+    Make predictions and analyze data.
     
-    # Find matching security keywords and their count
-    security_matches = self.df['combined_text'].apply(
-        lambda x: self._find_matching_keywords(x, security_keywords)
+    Args:
+        model_trainer (ModelTrainer): Trained model instance
+        input_data: Input data (DataFrame or path to file)
+        nltk_data_path (str): Path to NLTK data directory
+        exclude_columns (list): Columns to exclude from Excel output
+        hidden_columns (list): Columns to hide in Excel output
+        
+    Returns:
+        tuple: (predictions_df, predictions_path, template_path)
+    """
+    logger.info("Running predictions and analysis")
+    
+    # Set default values if None
+    exclude_columns = exclude_columns or []
+    hidden_columns = hidden_columns or []
+    
+    # Common columns to consider excluding/hiding
+    common_exclude_candidates = [
+        'combined_text',               # Usually large and redundant with summary+description
+        'original_security_matches',   # Internal use, redundant with security_matches
+        'original_fraud_matches',      # Internal use, redundant with fraud_matches
+        'has_security_keywords',       # Internal use, redundant with security_prediction
+        'has_fraud_keywords',          # Internal use, redundant with fraud_prediction
+        'initial_security_flag',       # Internal use, superseded by security_prediction
+        'initial_fraud_flag'           # Internal use, superseded by fraud_prediction
+    ]
+    
+    common_hide_candidates = [
+        'security_keyword_count',      # Technical detail, but might be useful
+        'fraud_keyword_count',         # Technical detail, but might be useful
+        'security_matching_keywords',  # Raw matches before filtering
+        'fraud_matching_keywords'      # Raw matches before filtering
+    ]
+    
+    # Update feature engineer if NLTK data path is provided
+    if nltk_data_path:
+        model_trainer.feature_engineer = FeatureEngineer(nltk_data_path)
+    
+    # Convert input_data to DataFrame if it's a file path
+    if isinstance(input_data, str):
+        input_df = pd.read_excel(input_data)
+    else:
+        input_df = input_data
+    
+    # Make predictions
+    predictions_df = model_trainer.predict_on_new_data(input_df)
+    
+    # Export predictions to Excel
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    predictions_path = os.path.join(
+        PROCESSED_DATA_PATH, 
+        f"security_fraud_predictions_{timestamp}.xlsx"
+    )
+    export_predictions_to_excel(
+        predictions_df, 
+        predictions_path,
+        exclude_columns=exclude_columns,
+        hidden_columns=hidden_columns
     )
     
-    # Separate matching keywords and counts
-    self.df['security_matching_keywords'] = security_matches.apply(lambda x: ', '.join(x[0]))
-    self.df['security_keyword_count'] = security_matches.apply(lambda x: x[1])
-    
-    # Find matching fraud keywords and their count
-    fraud_matches = self.df['combined_text'].apply(
-        lambda x: self._find_matching_keywords(x, fraud_keywords)
+    # Generate feedback template
+    template_path = os.path.join(
+        PROCESSED_DATA_PATH, 
+        f"feedback_template_{timestamp}.xlsx"
     )
+    generate_feedback_template(predictions_df, template_path)
     
-    # Separate matching keywords and counts
-    self.df['fraud_matching_keywords'] = fraud_matches.apply(lambda x: ', '.join(x[0]))
-    self.df['fraud_keyword_count'] = fraud_matches.apply(lambda x: x[1])
+    logger.info(f"Predictions saved to {predictions_path}")
+    logger.info(f"Feedback template saved to {template_path}")
     
-    # Add original keyword matches (for reference)
-    original_security_matches = self.df['combined_text'].apply(
-        lambda x: ', '.join([k for k in SECURITY_KEYWORDS if k.lower() in str(x).lower()])
-    )
-    original_fraud_matches = self.df['combined_text'].apply(
-        lambda x: ', '.join([k for k in FRAUD_KEYWORDS if k.lower() in str(x).lower()])
-    )
+    # Summary statistics
+    security_count = predictions_df['security_prediction'].sum()
+    fraud_count = predictions_df['fraud_prediction'].sum()
+    both_count = ((predictions_df['security_prediction'] == 1) & 
+                  (predictions_df['fraud_prediction'] == 1)).sum()
     
-    self.df['original_security_matches'] = original_security_matches
-    self.df['original_fraud_matches'] = original_fraud_matches
+    logger.info(f"Analysis Summary:")
+    logger.info(f"Total user stories analyzed: {len(predictions_df)}")
+    logger.info(f"User stories with security impacts: {security_count} ({security_count/len(predictions_df)*100:.1f}%)")
+    logger.info(f"User stories with fraud impacts: {fraud_count} ({fraud_count/len(predictions_df)*100:.1f}%)")
+    logger.info(f"User stories with both security and fraud impacts: {both_count} ({both_count/len(predictions_df)*100:.1f}%)")
     
-    # Flag if any keywords are present
-    self.df['has_security_keywords'] = self.df['security_keyword_count'] > 0
-    self.df['has_fraud_keywords'] = self.df['fraud_keyword_count'] > 0
+    return predictions_df, predictions_path, template_path
+
+
+
+
+# Update the parse_arguments function in main.py
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Jira User Story Security and Fraud Analysis')
     
-    # Initial labels based purely on keywords - to be refined by ML model
-    self.df['initial_security_flag'] = self.df['has_security_keywords']
-    self.df['initial_fraud_flag'] = self.df['has_fraud_keywords']
+    parser.add_argument('--extract', action='store_true', 
+                        help='Extract user stories from Jira')
+    parser.add_argument('--analyze', action='store_true',
+                        help='Analyze existing data without extraction')
+    parser.add_argument('--train', action='store_true',
+                        help='Train or update the ML model')
+    parser.add_argument('--predict', action='store_true',
+                        help='Make predictions on existing data')
+    parser.add_argument('--projects', nargs='+', type=str,
+                        help='List of Jira project keys to extract (comma-separated or space-separated)')
+    parser.add_argument('--project-file', type=str,
+                        help='Path to file containing list of Jira project keys (one per line)')
+    parser.add_argument('--input', type=str,
+                        help='Input file path (for analyze, train, or predict modes)')
+    parser.add_argument('--output', type=str,
+                        help='Output file path (optional)')
+    parser.add_argument('--feedback', type=str,
+                        help='Path to feedback file for model updating')
+    parser.add_argument('--nltk-data', type=str, default='C:/nltk_data',
+                        help='Path to NLTK data directory (default: C:/nltk_data)')
+    parser.add_argument('--exclude-columns', nargs='+', type=str,
+                        help='Columns to exclude from Excel output (space-separated)')
+    parser.add_argument('--hide-columns', nargs='+', type=str,
+                        help='Columns to hide in Excel output (space-separated)')
+    parser.add_argument('--excel-config', type=str,
+                        help='Path to Excel configuration file (JSON format)')
     
-    logger.info("Added keyword-based features with matching keywords and similar word detection")
+    return parser.parse_args()
+
+
+
+
+# excel_config.json - Example configuration for Excel output
+
+{
+  "exclude_columns": [
+    "combined_text", 
+    "original_security_matches", 
+    "original_fraud_matches", 
+    "has_security_keywords", 
+    "has_fraud_keywords", 
+    "initial_security_flag", 
+    "initial_fraud_flag"
+  ],
+  "hidden_columns": [
+    "security_keyword_count", 
+    "fraud_keyword_count"
+  ],
+  "column_widths": {
+    "summary": 50,
+    "description": 70,
+    "security_matches": 35,
+    "fraud_matches": 35,
+    "prediction_explanation": 65
+  }
+}
+
+
+# Update the main function in main.py to handle the new column filtering options
+
+def main():
+    """Main function to orchestrate the workflow."""
+    # Create necessary directories
+    os.makedirs('logs', exist_ok=True)
+    setup_directories()
+    
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    if not any([args.extract, args.analyze, args.train, args.predict]):
+        logger.info("No action specified. Running complete workflow.")
+        args.extract = args.analyze = args.train = args.predict = True
+    
+    # Initialize column filtering options
+    exclude_columns = args.exclude_columns or []
+    hidden_columns = args.hide_columns or []
+    
+    # Load Excel configuration if provided
+    if args.excel_config and os.path.exists(args.excel_config):
+        try:
+            import json
+            with open(args.excel_config, 'r') as f:
+                excel_config = json.load(f)
+                
+            # Update exclude and hidden columns from config
+            if 'exclude_columns' in excel_config:
+                exclude_columns.extend([col for col in excel_config['exclude_columns'] 
+                                       if col not in exclude_columns])
+            
+            if 'hidden_columns' in excel_config:
+                hidden_columns.extend([col for col in excel_config['hidden_columns'] 
+                                     if col not in hidden_columns])
+                
+            logger.info(f"Loaded Excel configuration from {args.excel_config}")
+        except Exception as e:
+            logger.error(f"Failed to load Excel configuration: {e}")
+    
+    # Extract data from Jira
+    if args.extract:
+        data_path = extract_jira_data(args.projects, args.project_file, args.output)
+        if not data_path:
+            logger.error("Data extraction failed. Exiting.")
+            return
+    else:
+        data_path = args.input or EXCEL_EXPORT_PATH
+    
+    # Preprocess data
+    if args.analyze or (not args.input and args.predict):
+        processed_path, processed_data = preprocess_data(data_path)
+        if not processed_path:
+            logger.error("Data preprocessing failed. Exiting.")
+            return
+    else:
+        processed_path = args.input or PROCESSED_EXCEL_PATH
+        processed_data = None
+    
+    # Train or update the model
+    if args.train:
+        model, trainer = train_model(processed_path, args.nltk_data, args.feedback)
+        if not model:
+            logger.error("Model training failed. Exiting.")
+            return
+    else:
+        # Initialize trainer with NLTK data path
+        trainer = ModelTrainer()
+        if args.nltk_data:
+            trainer.feature_engineer = FeatureEngineer(args.nltk_data)
+    
+    # Make predictions and analyze
+    if args.predict or args.analyze:
+        input_data = processed_data if processed_data is not None else processed_path
+        predictions_df, predictions_path, template_path = predict_and_analyze(
+            trainer, 
+            input_data, 
+            args.nltk_data,
+            exclude_columns=exclude_columns,
+            hidden_columns=hidden_columns
+        )
+        
+        logger.info("Analysis complete!")
+        logger.info(f"Results available at {predictions_path}")
+        logger.info(f"Feedback template available at {template_path}")
+    
+    logger.info("All operations completed successfully")
+
+
+
+{
+  "exclude_columns": [
+    "combined_text", 
+    "original_security_matches", 
+    "has_security_keywords"
+  ],
+  "hidden_columns": [
+    "security_keyword_count", 
+    "fraud_keyword_count"
+  ],
+  "column_widths": {
+    "summary": 50,
+    "description": 70
+  }
+}
