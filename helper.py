@@ -1,223 +1,431 @@
-# Fix for the generate_program_impact_pivot method in PivotAnalyzer class
+# Update the _create_email_template method in EmailReporter class to remove chart section
 
-def generate_program_impact_pivot(self, predictions_df):
+def _create_email_template(self):
+    """Create the HTML email template if it doesn't exist."""
+    template_path = 'templates/email_template.html'
+    
+    if not os.path.exists(template_path):
+        html_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 800px;
+                    margin: 0 auto;
+                }
+                .header {
+                    background-color: #004080;
+                    color: white;
+                    padding: 20px;
+                    text-align: center;
+                }
+                .content {
+                    padding: 20px;
+                }
+                .summary-box {
+                    background-color: #f5f5f5;
+                    border-left: 4px solid #004080;
+                    padding: 15px;
+                    margin-bottom: 20px;
+                }
+                .summary-table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-bottom: 20px;
+                }
+                .summary-table th {
+                    background-color: #004080;
+                    color: white;
+                    text-align: left;
+                    padding: 10px;
+                }
+                .summary-table td {
+                    border: 1px solid #ddd;
+                    padding: 10px;
+                }
+                .pivot-table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 15px 0;
+                    font-size: 0.9em;
+                }
+                .pivot-table th {
+                    background-color: #004080;
+                    color: white;
+                    text-align: left;
+                    padding: 8px;
+                }
+                .pivot-table td {
+                    border: 1px solid #ddd;
+                    padding: 8px;
+                }
+                .pivot-table tr:nth-child(even) {
+                    background-color: #f9f9f9;
+                }
+                .pivot-table tr:hover {
+                    background-color: #f1f1f1;
+                }
+                .charts {
+                    text-align: center;
+                    margin: 30px 0;
+                }
+                .chart {
+                    margin-bottom: 20px;
+                }
+                .footer {
+                    background-color: #f5f5f5;
+                    padding: 15px;
+                    text-align: center;
+                    font-size: 0.8em;
+                    color: #666;
+                }
+                .highlight {
+                    background-color: #ffffcc;
+                    padding: 2px 5px;
+                    font-weight: bold;
+                }
+                .security {
+                    color: #e67e00;
+                }
+                .fraud {
+                    color: #9c27b0;
+                }
+                .both {
+                    color: #d32f2f;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>Jira Security & Fraud Analysis Report</h1>
+                <p>{{ report_date }}</p>
+            </div>
+            <div class="content">
+                <h2>Analysis Summary</h2>
+                <div class="summary-box">
+                    <p>This report analyzes <strong>{{ total_stories }}</strong> Jira user stories for security and fraud impacts.</p>
+                    <p>Analysis completed on <strong>{{ analysis_date }}</strong></p>
+                </div>
+                
+                <h3>Key Findings</h3>
+                <table class="summary-table">
+                    <tr>
+                        <th>Metric</th>
+                        <th>Count</th>
+                        <th>Percentage</th>
+                    </tr>
+                    <tr>
+                        <td>Stories with <span class="security">Security Impact</span></td>
+                        <td>{{ security_count }}</td>
+                        <td>{{ security_percent }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Stories with <span class="fraud">Fraud Impact</span></td>
+                        <td>{{ fraud_count }}</td>
+                        <td>{{ fraud_percent }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Stories with <span class="both">Both Impacts</span></td>
+                        <td>{{ both_count }}</td>
+                        <td>{{ both_percent }}%</td>
+                    </tr>
+                    <tr>
+                        <td>Stories with Any Impact</td>
+                        <td>{{ any_count }}</td>
+                        <td>{{ any_percent }}%</td>
+                    </tr>
+                </table>
+                
+                {% if has_pivot_data %}
+                <h3>Program Impact Analysis</h3>
+                <p>The table below shows the distribution of security and fraud impacts across test programs:</p>
+                
+                {{ pivot_html|safe }}
+                
+                <p><em>Note: The full pivot table analysis is available in the attached Excel file.</em></p>
+                {% endif %}
+                
+                <h3>Model Performance</h3>
+                <p>The model achieved the following performance metrics:</p>
+                <table class="summary-table">
+                    <tr>
+                        <th>Model</th>
+                        <th>Accuracy</th>
+                        <th>Precision</th>
+                        <th>Recall</th>
+                        <th>F1-Score</th>
+                    </tr>
+                    <tr>
+                        <td>Security Impact</td>
+                        <td>{{ security_accuracy }}</td>
+                        <td>{{ security_precision }}</td>
+                        <td>{{ security_recall }}</td>
+                        <td>{{ security_f1 }}</td>
+                    </tr>
+                    <tr>
+                        <td>Fraud Impact</td>
+                        <td>{{ fraud_accuracy }}</td>
+                        <td>{{ fraud_precision }}</td>
+                        <td>{{ fraud_recall }}</td>
+                        <td>{{ fraud_f1 }}</td>
+                    </tr>
+                </table>
+                
+                {% if has_confusion_matrices %}
+                <div class="charts">
+                    <h3>Confusion Matrices</h3>
+                    <div class="chart">
+                        <img src="cid:confusion_matrices" alt="Confusion Matrices" style="max-width: 100%;">
+                    </div>
+                </div>
+                {% endif %}
+                
+                <h3>Highlighted Stories</h3>
+                <p>Top security-impacted stories:</p>
+                <ul>
+                    {% for story in top_security_stories %}
+                    <li><strong>{{ story.issue_key }}</strong>: {{ story.summary }} 
+                        <span class="highlight security">({{ story.security_probability|round(2) }})</span></li>
+                    {% endfor %}
+                </ul>
+                
+                <p>Top fraud-impacted stories:</p>
+                <ul>
+                    {% for story in top_fraud_stories %}
+                    <li><strong>{{ story.issue_key }}</strong>: {{ story.summary }} 
+                        <span class="highlight fraud">({{ story.fraud_probability|round(2) }})</span></li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <div class="footer">
+                <p>This report was automatically generated by the Jira Security & Fraud Analysis System</p>
+                <p>Full results are available in the attached Excel file.</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        with open(template_path, 'w') as f:
+            f.write(html_template)
+        
+        logger.info(f"Created email template at {template_path}")
+
+
+
+
+
+
+
+# Update the generate_email_report method in EmailReporter class
+
+def generate_email_report(self, predictions_df, evaluation=None, predictions_path=None):
     """
-    Generate a pivot table showing test program impacts on security and fraud.
+    Generate and send email report with analysis results.
     
     Args:
         predictions_df (pandas.DataFrame): DataFrame with predictions
+        evaluation (dict): Evaluation metrics (optional)
+        predictions_path (str): Path to the Excel file with predictions (optional)
         
     Returns:
-        pandas.DataFrame: Pivot table DataFrame
+        str: HTML content of the email
     """
-    try:
-        # Check if predictions_df is valid
-        if predictions_df is None or len(predictions_df) == 0:
-            logger.warning("No data available for pivot table analysis")
-            return None
+    # Calculate summary statistics
+    total_stories = len(predictions_df)
+    security_count = predictions_df['security_prediction'].sum()
+    fraud_count = predictions_df['fraud_prediction'].sum()
+    both_count = ((predictions_df['security_prediction'] == 1) & 
+                  (predictions_df['fraud_prediction'] == 1)).sum()
+    any_count = ((predictions_df['security_prediction'] == 1) | 
+                 (predictions_df['fraud_prediction'] == 1)).sum()
+    
+    security_percent = round(security_count / total_stories * 100, 1) if total_stories > 0 else 0
+    fraud_percent = round(fraud_count / total_stories * 100, 1) if total_stories > 0 else 0
+    both_percent = round(both_count / total_stories * 100, 1) if total_stories > 0 else 0
+    any_percent = round(any_count / total_stories * 100, 1) if total_stories > 0 else 0
+    
+    # Get top security and fraud stories
+    top_security_stories = predictions_df[predictions_df['security_prediction'] == 1].sort_values(
+        by='security_probability', ascending=False).head(5)
+    
+    top_fraud_stories = predictions_df[predictions_df['fraud_prediction'] == 1].sort_values(
+        by='fraud_probability', ascending=False).head(5)
+    
+    # Generate pivot table for program impacts
+    pivot_analyzer = PivotAnalyzer()
+    program_impact_pivot = pivot_analyzer.generate_program_impact_pivot(predictions_df)
+    
+    # Convert pivot table to HTML for email
+    pivot_html = ""
+    has_pivot_data = False
+    
+    if program_impact_pivot is not None and not program_impact_pivot.empty:
+        has_pivot_data = True
         
-        # Extract program name from issue_key or project_key if available
-        if 'issue_key' in predictions_df.columns:
-            # Try to extract program name from issue key (assuming format PROJECT-123)
-            predictions_df['program'] = predictions_df['issue_key'].str.split('-').str[0]
-        elif 'project_key' in predictions_df.columns:
-            # Use project_key as program
-            predictions_df['program'] = predictions_df['project_key']
-        else:
-            logger.warning("No program/project identifier found in data")
-            return None
+        # Get top 20 programs for email display (increased from 10)
+        display_pivot = program_impact_pivot.head(20)
         
-        # Create a copy of the dataframe with only the columns we need
-        pivot_df = predictions_df[['program', 'security_prediction', 'fraud_prediction', 'security_probability', 'fraud_probability']].copy()
-        
-        # Calculate both impacts count separately
-        pivot_df['both_impacts'] = ((pivot_df['security_prediction'] == 1) & 
-                                   (pivot_df['fraud_prediction'] == 1)).astype(int)
-        
-        # Create pure security and fraud counts (excluding overlaps)
-        pivot_df['security_only'] = ((pivot_df['security_prediction'] == 1) & 
-                                    (pivot_df['fraud_prediction'] == 0)).astype(int)
-        pivot_df['fraud_only'] = ((pivot_df['security_prediction'] == 0) & 
-                                 (pivot_df['fraud_prediction'] == 1)).astype(int)
-        
-        # Group by program and count security and fraud impacts
-        pivot_table = pd.pivot_table(
-            pivot_df,
-            index='program',
-            values=['security_only', 'fraud_only', 'both_impacts', 'security_prediction', 'fraud_prediction'],
-            aggfunc='sum'
-        )
-        
-        # Calculate total impacts correctly (avoiding double-counting)
-        pivot_table['total_impacts'] = pivot_table['security_only'] + pivot_table['fraud_only'] + pivot_table['both_impacts']
-        
-        # Add average probability columns
-        security_prob_pivot = pd.pivot_table(
-            pivot_df[pivot_df['security_prediction'] == 1],
-            index='program',
-            values='security_probability',
-            aggfunc='mean'
-        )
-        
-        fraud_prob_pivot = pd.pivot_table(
-            pivot_df[pivot_df['fraud_prediction'] == 1],
-            index='program',
-            values='fraud_probability',
-            aggfunc='mean'
-        )
-        
-        # Add these to the main pivot table
-        pivot_table = pivot_table.join(security_prob_pivot, how='left')
-        pivot_table = pivot_table.join(fraud_prob_pivot, how='left')
-        
-        # Rename columns for clarity and rearrange
-        final_columns = [
-            'security_prediction', 
-            'fraud_prediction', 
-            'security_only',
-            'fraud_only',
-            'both_impacts',
-            'total_impacts',
-            'security_probability',
-            'fraud_probability'
-        ]
-        
-        # Make sure all columns exist
-        for col in final_columns:
-            if col not in pivot_table.columns:
-                pivot_table[col] = 0
-        
-        # Select and rename columns
-        pivot_table = pivot_table[final_columns]
-        
-        pivot_table.columns = [
+        # Select specific columns for display
+        display_columns = [
             'Total Security Impacts', 
             'Total Fraud Impacts',
             'Security Only',
-            'Fraud Only',
+            'Fraud Only', 
             'Both Impacts',
-            'Total Impacts',
-            'Avg Security Probability',
-            'Avg Fraud Probability'
+            'Total Impacts'
         ]
         
-        # Sort by total impacts descending
-        pivot_table = pivot_table.sort_values('Total Impacts', ascending=False)
+        # Make sure all columns exist
+        for col in display_columns:
+            if col not in display_pivot.columns:
+                display_pivot[col] = 0
         
-        # Calculate percentages
-        total_security = pivot_table['Total Security Impacts'].sum()
-        total_fraud = pivot_table['Total Fraud Impacts'].sum()
+        # Use only the columns we want to display
+        email_pivot = display_pivot[display_columns]
         
-        if total_security > 0:
-            pivot_table['Security %'] = (pivot_table['Total Security Impacts'] / total_security * 100).round(1)
-        else:
-            pivot_table['Security %'] = 0
-            
-        if total_fraud > 0:
-            pivot_table['Fraud %'] = (pivot_table['Total Fraud Impacts'] / total_fraud * 100).round(1)
-        else:
-            pivot_table['Fraud %'] = 0
-        
-        # Fill NaN values
-        pivot_table = pivot_table.fillna(0)
-        
-        # Round probability columns
-        for col in ['Avg Security Probability', 'Avg Fraud Probability']:
-            if col in pivot_table.columns:
-                pivot_table[col] = pivot_table[col].round(2)
-        
-        return pivot_table
-    
-    except Exception as e:
-        logger.error(f"Error generating program impact pivot table: {e}")
-        return None
-
-
-
-# Updated generate_pivot_chart_image method in PivotAnalyzer class
-
-def generate_pivot_chart_image(self, pivot_table):
-    """
-    Generate a chart image from the pivot table for email reports.
-    
-    Args:
-        pivot_table (pandas.DataFrame): Pivot table DataFrame
-        
-    Returns:
-        bytes: Image data as bytes
-    """
-    try:
-        if pivot_table is None or len(pivot_table) == 0:
-            logger.warning("No pivot table data available for chart image")
-            return None
-        
-        # Verify matplotlib is available
-        import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        
-        # Limit to top 10 programs for readability
-        display_pivot = pivot_table.head(10).copy()
-        
-        # Select columns to plot (ensure they exist)
-        if 'Both Impacts' in display_pivot.columns and 'Security Only' in display_pivot.columns and 'Fraud Only' in display_pivot.columns:
-            plot_data = display_pivot[['Security Only', 'Fraud Only', 'Both Impacts']]
-        else:
-            # Fallback to whatever columns are available
-            plot_cols = [col for col in ['Total Security Impacts', 'Total Fraud Impacts'] if col in display_pivot.columns]
-            plot_data = display_pivot[plot_cols]
-        
-        # Create a figure
-        plt.figure(figsize=(10, 6))
-        
-        # Create a grouped bar chart
-        ax = plot_data.plot(
-            kind='bar',
-            color=['#4285F4', '#EA4335', '#FBBC05'],  # Blue, Red, Yellow
-            alpha=0.8,
-            rot=45
+        # Create HTML with custom styling
+        pivot_html = email_pivot.to_html(
+            classes='pivot-table',
+            float_format=lambda x: f'{x:.0f}' if isinstance(x, float) else str(x)
         )
         
-        # Add labels and title
-        plt.title('Security and Fraud Impacts by Program', fontsize=14)
-        plt.ylabel('Number of Impacts', fontsize=12)
-        plt.xlabel('Program', fontsize=12)
+        # Apply custom formatting to the HTML table
+        pivot_html = pivot_html.replace('<table', '<table style="width:100%; border-collapse:collapse; margin:15px 0; font-size:0.9em;"')
+        pivot_html = pivot_html.replace('<th>', '<th style="background-color:#004080; color:white; padding:8px; text-align:left;">')
+        pivot_html = pivot_html.replace('<td>', '<td style="border:1px solid #ddd; padding:8px;">')
+        pivot_html = pivot_html.replace('<tr>', '<tr style="border-bottom:1px solid #ddd;">')
         
-        # Add data labels on bars
-        for container in ax.containers:
-            ax.bar_label(container, fmt='%d', padding=3)
-        
-        # Add a legend
-        plt.legend(loc='best')
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Save the figure to a bytes buffer
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
-        buf.seek(0)
-        
-        # Close the figure to free memory
-        plt.close()
-        
-        logger.info("Successfully generated pivot chart image")
-        return buf.getvalue()
+        # Add alternating row colors
+        pivot_html = pivot_html.replace('<tr style="border-bottom:1px solid #ddd;">', 
+                                       '<tr style="border-bottom:1px solid #ddd; background-color:#f9f9f9;">', 
+                                       len(display_pivot) // 2)
+    
+    # Prepare template data
+    template_data = {
+        'report_date': datetime.now().strftime("%B %d, %Y"),
+        'analysis_date': datetime.now().strftime("%B %d, %Y at %H:%M"),
+        'total_stories': total_stories,
+        'security_count': int(security_count),
+        'fraud_count': int(fraud_count),
+        'both_count': int(both_count),
+        'any_count': int(any_count),
+        'security_percent': security_percent,
+        'fraud_percent': fraud_percent,
+        'both_percent': both_percent,
+        'any_percent': any_percent,
+        'top_security_stories': top_security_stories.to_dict('records'),
+        'top_fraud_stories': top_fraud_stories.to_dict('records'),
+        'has_pivot_data': has_pivot_data,
+        'pivot_html': pivot_html
+    }
+    
+    # Add model performance metrics if available
+    has_model_metrics = False
+    if evaluation:
+        logger.info("Adding model performance metrics to email report")
+        try:
+            security_report = evaluation.get('security_report', {})
+            fraud_report = evaluation.get('fraud_report', {})
             
-    except Exception as e:
-        logger.error(f"Error generating pivot chart image: {e}")
-        # Add more detailed error logging
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
+            # Check if we have valid classification reports
+            if isinstance(security_report, dict) and isinstance(fraud_report, dict):
+                has_model_metrics = True
+                
+                # Handle security metrics
+                security_metrics = {}
+                if 'accuracy' in security_report:
+                    security_metrics['accuracy'] = round(security_report['accuracy'] * 100, 1)
+                
+                # Check for class '1' metrics (positive class)
+                if '1' in security_report:
+                    security_metrics['precision'] = round(security_report['1']['precision'] * 100, 1)
+                    security_metrics['recall'] = round(security_report['1']['recall'] * 100, 1)
+                    security_metrics['f1'] = round(security_report['1']['f1-score'] * 100, 1)
+                else:
+                    # If no positive class, check for macro avg
+                    if 'macro avg' in security_report:
+                        security_metrics['precision'] = round(security_report['macro avg']['precision'] * 100, 1)
+                        security_metrics['recall'] = round(security_report['macro avg']['recall'] * 100, 1)
+                        security_metrics['f1'] = round(security_report['macro avg']['f1-score'] * 100, 1)
+                    else:
+                        security_metrics['precision'] = security_metrics['recall'] = security_metrics['f1'] = 'N/A'
+                
+                # Handle fraud metrics
+                fraud_metrics = {}
+                if 'accuracy' in fraud_report:
+                    fraud_metrics['accuracy'] = round(fraud_report['accuracy'] * 100, 1)
+                
+                # Check for class '1' metrics (positive class)
+                if '1' in fraud_report:
+                    fraud_metrics['precision'] = round(fraud_report['1']['precision'] * 100, 1)
+                    fraud_metrics['recall'] = round(fraud_report['1']['recall'] * 100, 1)
+                    fraud_metrics['f1'] = round(fraud_report['1']['f1-score'] * 100, 1)
+                else:
+                    # If no positive class, check for macro avg
+                    if 'macro avg' in fraud_report:
+                        fraud_metrics['precision'] = round(fraud_report['macro avg']['precision'] * 100, 1)
+                        fraud_metrics['recall'] = round(fraud_report['macro avg']['recall'] * 100, 1)
+                        fraud_metrics['f1'] = round(fraud_report['macro avg']['f1-score'] * 100, 1)
+                    else:
+                        fraud_metrics['precision'] = fraud_metrics['recall'] = fraud_metrics['f1'] = 'N/A'
+                
+                template_data.update({
+                    'security_accuracy': security_metrics.get('accuracy', 'N/A'),
+                    'security_precision': security_metrics.get('precision', 'N/A'),
+                    'security_recall': security_metrics.get('recall', 'N/A'),
+                    'security_f1': security_metrics.get('f1', 'N/A'),
+                    'fraud_accuracy': fraud_metrics.get('accuracy', 'N/A'),
+                    'fraud_precision': fraud_metrics.get('precision', 'N/A'),
+                    'fraud_recall': fraud_metrics.get('recall', 'N/A'),
+                    'fraud_f1': fraud_metrics.get('f1', 'N/A')
+                })
+                
+                logger.info("Successfully added model metrics to email report")
+            else:
+                logger.warning("Evaluation data does not contain valid classification reports")
+        except Exception as e:
+            logger.error(f"Error processing evaluation metrics for email: {e}")
+            has_model_metrics = False
+    
+    # If we don't have metrics or there was an error, use default N/A values
+    if not has_model_metrics:
+        logger.info("Using default N/A values for model metrics in email report")
+        template_data.update({
+            'security_accuracy': 'N/A',
+            'security_precision': 'N/A',
+            'security_recall': 'N/A',
+            'security_f1': 'N/A',
+            'fraud_accuracy': 'N/A',
+            'fraud_precision': 'N/A',
+            'fraud_recall': 'N/A',
+            'fraud_f1': 'N/A'
+        })
+    
+    # Check if we have confusion matrices
+    template_data['has_confusion_matrices'] = (
+        evaluation and 
+        'security_confusion_matrix' in evaluation and
+        'fraud_confusion_matrix' in evaluation
+    )
+    
+    # Generate HTML using Jinja2 template
+    env = Environment(loader=FileSystemLoader('templates'))
+    template = env.get_template('email_template.html')
+    html_content = template.render(**template_data)
+    
+    return html_content
 
 
 
 
 
 
-# Updated send_email_report method in EmailReporter class with improved pivot chart handling
+# Update the send_email_report method in EmailReporter class to remove chart
 
 def send_email_report(self, recipients, subject, html_content, evaluation=None, predictions_path=None, predictions_df=None):
     """
@@ -271,14 +479,13 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
         else:
             logger.info("No confusion matrices available to include in email")
         
-        # Generate and attach pivot table chart if predictions_df is provided
+        # Generate and attach pivot table Excel file if predictions_df is provided
         if predictions_df is not None and not predictions_df.empty:
             try:
                 # Import within the try block to handle missing dependencies
                 from src.utils.pivot_analyzer import PivotAnalyzer
-                import io
                 
-                logger.info("Generating pivot table and chart for email report")
+                logger.info("Generating pivot table for email report")
                 
                 # Create pivot analyzer
                 pivot_analyzer = PivotAnalyzer()
@@ -287,34 +494,19 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
                 pivot_table = pivot_analyzer.generate_program_impact_pivot(predictions_df)
                 
                 if pivot_table is not None and not pivot_table.empty:
-                    # Generate chart image
-                    logger.info("Generating pivot chart image")
-                    chart_image = pivot_analyzer.generate_pivot_chart_image(pivot_table)
-                    
-                    if chart_image:
-                        # Attach the chart image
-                        logger.info("Attaching pivot chart image to email")
-                        pivot_image = MIMEImage(chart_image)
-                        pivot_image.add_header('Content-ID', '<program_impact_chart>')
-                        pivot_image.add_header('Content-Disposition', 'inline')
-                        msg.attach(pivot_image)
-                        logger.info("Program impact chart attached to email")
-                        
-                        # Create and attach the pivot Excel file
-                        pivot_path = pivot_analyzer.create_pivot_excel(pivot_table)
-                        if pivot_path and os.path.exists(pivot_path):
-                            with open(pivot_path, 'rb') as f:
-                                pivot_attachment = MIMEApplication(f.read(), _subtype='xlsx')
-                                pivot_attachment.add_header('Content-Disposition', 'attachment', 
-                                                        filename='program_impact_analysis.xlsx')
-                                msg.attach(pivot_attachment)
-                                logger.info("Pivot table Excel file attached to email")
-                    else:
-                        logger.warning("Failed to generate program impact chart")
+                    # Create and attach the pivot Excel file only (no chart)
+                    pivot_path = pivot_analyzer.create_pivot_excel(pivot_table)
+                    if pivot_path and os.path.exists(pivot_path):
+                        with open(pivot_path, 'rb') as f:
+                            pivot_attachment = MIMEApplication(f.read(), _subtype='xlsx')
+                            pivot_attachment.add_header('Content-Disposition', 'attachment', 
+                                                     filename='program_impact_analysis.xlsx')
+                            msg.attach(pivot_attachment)
+                            logger.info("Pivot table Excel file attached to email")
                 else:
                     logger.warning("No valid pivot table data to include in email")
             except Exception as e:
-                logger.error(f"Error generating pivot table chart: {e}")
+                logger.error(f"Error generating pivot table: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
         
@@ -351,4 +543,3 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
         import traceback
         logger.error(traceback.format_exc())
         return False
-
