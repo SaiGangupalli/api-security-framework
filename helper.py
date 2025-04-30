@@ -1,226 +1,322 @@
-# Update in src/utils/email_reporter.py - fix generate_confusion_matrix_image method
+# src/utils/pivot_analyzer.py
+import pandas as pd
+import numpy as np
+import logging
+import io
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.chart import BarChart, Reference
+from openpyxl.utils import get_column_letter
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-def generate_confusion_matrix_image(self, evaluation):
-    """
-    Generate confusion matrix visualization.
+logger = logging.getLogger(__name__)
+
+class PivotAnalyzer:
+    """Class to generate pivot tables and charts for security and fraud analysis."""
     
-    Args:
-        evaluation (dict): Evaluation metrics including confusion matrices
+    def __init__(self):
+        """Initialize the pivot analyzer."""
+        pass
+    
+    def generate_program_impact_pivot(self, predictions_df):
+        """
+        Generate a pivot table showing test program impacts on security and fraud.
         
-    Returns:
-        bytes: Image data as bytes
-    """
-    try:
-        # Check if confusion matrices are available in the evaluation
-        if ('security_confusion_matrix' not in evaluation or 
-            'fraud_confusion_matrix' not in evaluation):
-            logger.warning("Confusion matrices not found in evaluation data")
-            return None
+        Args:
+            predictions_df (pandas.DataFrame): DataFrame with predictions
             
-        # Create the figure
-        plt.figure(figsize=(12, 5))
-        
-        # Security confusion matrix
-        plt.subplot(1, 2, 1)
-        security_cm = evaluation['security_confusion_matrix']
-        sns.heatmap(
-            security_cm, 
-            annot=True, 
-            fmt='d', 
-            cmap='Blues',
-            xticklabels=['No Security Impact', 'Security Impact'],
-            yticklabels=['No Security Impact', 'Security Impact']
-        )
-        plt.title('Security Impact Confusion Matrix')
-        
-        # Fraud confusion matrix
-        plt.subplot(1, 2, 2)
-        fraud_cm = evaluation['fraud_confusion_matrix']
-        sns.heatmap(
-            fraud_cm, 
-            annot=True, 
-            fmt='d', 
-            cmap='Oranges',
-            xticklabels=['No Fraud Impact', 'Fraud Impact'],
-            yticklabels=['No Fraud Impact', 'Fraud Impact']
-        )
-        plt.title('Fraud Impact Confusion Matrix')
-        
-        plt.tight_layout()
-        
-        # Save the figure to a bytes buffer
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
-        buf.seek(0)
-        
-        # Close the figure to free memory
-        plt.close()
-        
-        return buf.getvalue()
-    except Exception as e:
-        logger.error(f"Error generating confusion matrix image: {e}")
-        # Return None instead of failing
-        return None
-
-
-
-
-
-
-# Update the train_model function in main.py to return evaluation metrics
-
-def train_model(input_data, nltk_data_path=None, feedback_path=None):
-    """
-    Train or update the ML model.
-    
-    Args:
-        input_data: Input data (DataFrame or path to file)
-        nltk_data_path (str): Path to NLTK data directory
-        feedback_path (str): Path to feedback file for model updating
-        
-    Returns:
-        tuple: (model, trainer, evaluation, importances)
-    """
-    logger.info("Starting model training")
-    
-    # Initialize feature engineer with NLTK data path
-    feature_engineer = FeatureEngineer(nltk_data_path)
-    
-    # Convert input_data to DataFrame if it's a file path
-    if isinstance(input_data, str):
-        trainer = ModelTrainer(input_data)
-        # Set the feature engineer
-        trainer.feature_engineer = feature_engineer
-    else:
-        trainer = ModelTrainer()
-        trainer.df = input_data
-        # Set the feature engineer
-        trainer.feature_engineer = feature_engineer
-    
-    # If feedback is provided, update the model
-    if feedback_path and os.path.exists(feedback_path):
-        logger.info(f"Incorporating feedback from {feedback_path}")
-        feedback_data = pd.read_excel(feedback_path)
-        model, evaluation, importances = trainer.update_model_with_feedback(feedback_data)
-    else:
-        # Train a new model
-        model, evaluation, importances = trainer.train_model()
-    
-    if model is None:
-        logger.error("Model training failed")
-        return None, None, None, None
-    
-    # Visualize results
-    visualize_results(evaluation, importances)
-    
-    # Update keyword lists based on feature importances
-    update_keyword_lists(importances)
-    
-    logger.info("Model training complete")
-    return model, trainer, evaluation, importances
-
-
-
-
-# Update the main function in main.py to capture and pass evaluation metrics
-
-def main():
-    """Main function to orchestrate the workflow."""
-    # Create necessary directories
-    os.makedirs('logs', exist_ok=True)
-    setup_directories()
-    
-    # Parse command line arguments
-    args = parse_arguments()
-    
-    if not any([args.extract, args.analyze, args.train, args.predict]):
-        logger.info("No action specified. Running complete workflow.")
-        args.extract = args.analyze = args.train = args.predict = True
-    
-    # Initialize column filtering options
-    exclude_columns = args.exclude_columns or []
-    hidden_columns = args.hide_columns or []
-    
-    # Load Excel configuration if provided
-    if args.excel_config and os.path.exists(args.excel_config):
+        Returns:
+            pandas.DataFrame: Pivot table DataFrame
+        """
         try:
-            import json
-            with open(args.excel_config, 'r') as f:
-                excel_config = json.load(f)
-                
-            # Update exclude and hidden columns from config
-            if 'exclude_columns' in excel_config:
-                exclude_columns.extend([col for col in excel_config['exclude_columns'] 
-                                       if col not in exclude_columns])
+            # Check if predictions_df is valid
+            if predictions_df is None or len(predictions_df) == 0:
+                logger.warning("No data available for pivot table analysis")
+                return None
             
-            if 'hidden_columns' in excel_config:
-                hidden_columns.extend([col for col in excel_config['hidden_columns'] 
-                                     if col not in hidden_columns])
+            # Extract program name from issue_key or project_key if available
+            if 'issue_key' in predictions_df.columns:
+                # Try to extract program name from issue key (assuming format PROJECT-123)
+                predictions_df['program'] = predictions_df['issue_key'].str.split('-').str[0]
+            elif 'project_key' in predictions_df.columns:
+                # Use project_key as program
+                predictions_df['program'] = predictions_df['project_key']
+            else:
+                logger.warning("No program/project identifier found in data")
+                return None
+            
+            # Create a copy of the dataframe with only the columns we need
+            pivot_df = predictions_df[['program', 'security_prediction', 'fraud_prediction', 'security_probability', 'fraud_probability']].copy()
+            
+            # Group by program and count security and fraud impacts
+            pivot_table = pd.pivot_table(
+                pivot_df,
+                index='program',
+                values=['security_prediction', 'fraud_prediction'],
+                aggfunc={
+                    'security_prediction': 'sum',
+                    'fraud_prediction': 'sum'
+                }
+            )
+            
+            # Add a combined impact column
+            pivot_table['total_impacts'] = pivot_table['security_prediction'] + pivot_table['fraud_prediction']
+            
+            # Add average probability columns
+            security_prob_pivot = pd.pivot_table(
+                pivot_df[pivot_df['security_prediction'] == 1],
+                index='program',
+                values='security_probability',
+                aggfunc='mean'
+            )
+            
+            fraud_prob_pivot = pd.pivot_table(
+                pivot_df[pivot_df['fraud_prediction'] == 1],
+                index='program',
+                values='fraud_probability',
+                aggfunc='mean'
+            )
+            
+            # Add these to the main pivot table
+            pivot_table = pivot_table.join(security_prob_pivot, how='left')
+            pivot_table = pivot_table.join(fraud_prob_pivot, how='left')
+            
+            # Rename columns for clarity
+            pivot_table.columns = [
+                'Security Impacts', 
+                'Fraud Impacts', 
+                'Total Impacts',
+                'Avg Security Probability',
+                'Avg Fraud Probability'
+            ]
+            
+            # Sort by total impacts descending
+            pivot_table = pivot_table.sort_values('Total Impacts', ascending=False)
+            
+            # Calculate percentages
+            total_security = pivot_table['Security Impacts'].sum()
+            total_fraud = pivot_table['Fraud Impacts'].sum()
+            
+            if total_security > 0:
+                pivot_table['Security %'] = (pivot_table['Security Impacts'] / total_security * 100).round(1)
+            else:
+                pivot_table['Security %'] = 0
                 
-            logger.info(f"Loaded Excel configuration from {args.excel_config}")
-        except Exception as e:
-            logger.error(f"Failed to load Excel configuration: {e}")
-    
-    # Extract data from Jira
-    if args.extract:
-        data_path = extract_jira_data(args.projects, args.project_file, args.output)
-        if not data_path:
-            logger.error("Data extraction failed. Exiting.")
-            return
-    else:
-        data_path = args.input or EXCEL_EXPORT_PATH
-    
-    # Preprocess data
-    if args.analyze or (not args.input and args.predict):
-        processed_path, processed_data = preprocess_data(data_path)
-        if not processed_path:
-            logger.error("Data preprocessing failed. Exiting.")
-            return
-    else:
-        processed_path = args.input or PROCESSED_EXCEL_PATH
-        processed_data = None
-    
-    # Initialize evaluation variable
-    evaluation = None
-    
-    # Train or update the model
-    if args.train:
-        model, trainer, evaluation, importances = train_model(processed_path, args.nltk_data, args.feedback)
-        if not model:
-            logger.error("Model training failed. Exiting.")
-            return
-    else:
-        # Initialize trainer with NLTK data path
-        trainer = ModelTrainer()
-        if args.nltk_data:
-            trainer.feature_engineer = FeatureEngineer(args.nltk_data)
-    
-    # Make predictions and analyze
-    if args.predict or args.analyze:
-        input_data = processed_data if processed_data is not None else processed_path
-        predictions_df, predictions_path, template_path = predict_and_analyze(
-            trainer, 
-            input_data, 
-            args.nltk_data,
-            exclude_columns=exclude_columns,
-            hidden_columns=hidden_columns,
-            send_email=args.email_report,
-            email_recipients=args.email_recipients,
-            email_subject=args.email_subject,
-            evaluation=evaluation  # Pass the evaluation from training
-        )
+            if total_fraud > 0:
+                pivot_table['Fraud %'] = (pivot_table['Fraud Impacts'] / total_fraud * 100).round(1)
+            else:
+                pivot_table['Fraud %'] = 0
+            
+            # Fill NaN values
+            pivot_table = pivot_table.fillna(0)
+            
+            # Round probability columns
+            for col in ['Avg Security Probability', 'Avg Fraud Probability']:
+                if col in pivot_table.columns:
+                    pivot_table[col] = pivot_table[col].round(2)
+            
+            return pivot_table
         
-        logger.info("Analysis complete!")
-        logger.info(f"Results available at {predictions_path}")
-        logger.info(f"Feedback template available at {template_path}")
+        except Exception as e:
+            logger.error(f"Error generating program impact pivot table: {e}")
+            return None
     
-    logger.info("All operations completed successfully")
+    def create_pivot_excel(self, pivot_table, output_path=None):
+        """
+        Create a formatted Excel file with the pivot table and charts.
+        
+        Args:
+            pivot_table (pandas.DataFrame): Pivot table DataFrame
+            output_path (str): Path to save the Excel file
+            
+        Returns:
+            str: Path to the created Excel file or None if failed
+        """
+        try:
+            if pivot_table is None or len(pivot_table) == 0:
+                logger.warning("No pivot table data available to export")
+                return None
+            
+            # Create Excel writer
+            if output_path is None:
+                output_path = 'data/processed/program_impact_pivot.xlsx'
+                
+            writer = pd.ExcelWriter(output_path, engine='openpyxl')
+            
+            # Write pivot table to Excel
+            pivot_table.to_excel(writer, sheet_name='Program Impacts', index=True)
+            
+            # Get workbook and worksheet
+            workbook = writer.book
+            worksheet = writer.sheets['Program Impacts']
+            
+            # Format header row
+            for col_idx in range(1, len(pivot_table.columns) + 2):  # +2 for index column
+                cell = worksheet.cell(row=1, column=col_idx)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
+                cell.alignment = Alignment(horizontal='center')
+            
+            # Format index column (program names)
+            for row_idx in range(2, len(pivot_table) + 2):
+                cell = worksheet.cell(row=row_idx, column=1)
+                cell.font = Font(bold=True)
+            
+            # Format numeric columns
+            for col_idx, col_name in enumerate(pivot_table.columns, start=2):  # Start at 2 because column 1 is the index
+                # Set column width
+                worksheet.column_dimensions[get_column_letter(col_idx)].width = 18
+                
+                # Apply number formatting
+                for row_idx in range(2, len(pivot_table) + 2):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    
+                    # Format based on column type
+                    if 'Impacts' in col_name:
+                        # Integer format
+                        cell.number_format = '0'
+                    elif 'Probability' in col_name:
+                        # Percentage format
+                        cell.number_format = '0.00'
+                        # Color gradient based on value
+                        value = cell.value or 0
+                        if value > 0:
+                            intensity = int(255 - (value * 155))  # Less intense to keep text readable
+                            color = f"{intensity:02X}{intensity:02X}{255:02X}" if 'Fraud' in col_name else f"{intensity:02X}{255:02X}{intensity:02X}"
+                            cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+                    elif '%' in col_name:
+                        # Percentage format
+                        cell.number_format = '0.0"%"'
+            
+            # Add a bar chart for security and fraud impacts
+            chart_sheet = workbook.create_sheet("Impact Charts")
+            
+            # Create the first chart (Security and Fraud Impacts)
+            impact_chart = BarChart()
+            impact_chart.title = "Security and Fraud Impacts by Program"
+            impact_chart.style = 10  # Use a nice style
+            impact_chart.y_axis.title = "Number of Impacts"
+            impact_chart.x_axis.title = "Program"
+            
+            # Define data ranges for the chart (first 10 programs only if more exist)
+            num_programs = min(10, len(pivot_table))
+            data = Reference(worksheet, min_col=2, max_col=3, min_row=1, max_row=num_programs+1)
+            cats = Reference(worksheet, min_col=1, min_row=2, max_row=num_programs+1)
+            
+            # Add data and categories
+            impact_chart.add_data(data, titles_from_data=True)
+            impact_chart.set_categories(cats)
+            
+            # Add the chart to the chart sheet
+            chart_sheet.add_chart(impact_chart, "A1")
+            
+            # Adjust chart sheet layout
+            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
+                chart_sheet.column_dimensions[col].width = 12
+                
+            # Make the chart large enough
+            impact_chart.height = 15
+            impact_chart.width = 20
+            
+            # Add the total row at the bottom
+            totals_row = len(pivot_table) + 2
+            worksheet.cell(row=totals_row, column=1).value = "TOTAL"
+            worksheet.cell(row=totals_row, column=1).font = Font(bold=True)
+            
+            # Add sum formulas for the numeric columns
+            for col_idx, col_name in enumerate(pivot_table.columns, start=2):
+                if 'Impacts' in col_name or '%' in col_name:
+                    col_letter = get_column_letter(col_idx)
+                    worksheet.cell(row=totals_row, column=col_idx).value = f"=SUM({col_letter}2:{col_letter}{len(pivot_table)+1})"
+                    worksheet.cell(row=totals_row, column=col_idx).font = Font(bold=True)
+                    worksheet.cell(row=totals_row, column=col_idx).fill = PatternFill(
+                        start_color="EEEEEE", 
+                        end_color="EEEEEE", 
+                        fill_type="solid"
+                    )
+            
+            # Save the workbook
+            writer.close()
+            
+            logger.info(f"Pivot table and charts saved to {output_path}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"Error creating pivot Excel file: {e}")
+            return None
+    
+    def generate_pivot_chart_image(self, pivot_table):
+        """
+        Generate a chart image from the pivot table for email reports.
+        
+        Args:
+            pivot_table (pandas.DataFrame): Pivot table DataFrame
+            
+        Returns:
+            bytes: Image data as bytes
+        """
+        try:
+            if pivot_table is None or len(pivot_table) == 0:
+                logger.warning("No pivot table data available for chart image")
+                return None
+            
+            # Limit to top 10 programs for readability
+            display_pivot = pivot_table.head(10).copy()
+            
+            # Create a figure
+            plt.figure(figsize=(10, 6))
+            
+            # Create a grouped bar chart
+            ax = display_pivot[['Security Impacts', 'Fraud Impacts']].plot(
+                kind='bar',
+                color=['#4285F4', '#EA4335'],  # Blue and Red
+                alpha=0.8,
+                rot=45
+            )
+            
+            # Add labels and title
+            plt.title('Security and Fraud Impacts by Program', fontsize=14)
+            plt.ylabel('Number of Impacts', fontsize=12)
+            plt.xlabel('Program', fontsize=12)
+            
+            # Add data labels on bars
+            for container in ax.containers:
+                ax.bar_label(container, fmt='%d', padding=3)
+            
+            # Add a legend
+            plt.legend(loc='best')
+            
+            # Adjust layout
+            plt.tight_layout()
+            
+            # Save the figure to a bytes buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
+            
+            # Close the figure to free memory
+            plt.close()
+            
+            return buf.getvalue()
+            
+        except Exception as e:
+            logger.error(f"Error generating pivot chart image: {e}")
+            return None
 
 
 
 
-# Update the generate_email_report method in EmailReporter class
 
+
+
+
+# Update the EmailReporter class in src/utils/email_reporter.py to include pivot table
+
+# Add this import at the top
+from src.utils.pivot_analyzer import PivotAnalyzer
+
+# Update the generate_email_report method
 def generate_email_report(self, predictions_df, evaluation=None, predictions_path=None):
     """
     Generate and send email report with analysis results.
@@ -240,7 +336,7 @@ def generate_email_report(self, predictions_df, evaluation=None, predictions_pat
     both_count = ((predictions_df['security_prediction'] == 1) & 
                   (predictions_df['fraud_prediction'] == 1)).sum()
     any_count = ((predictions_df['security_prediction'] == 1) | 
-                  (predictions_df['fraud_prediction'] == 1)).sum()
+                 (predictions_df['fraud_prediction'] == 1)).sum()
     
     security_percent = round(security_count / total_stories * 100, 1) if total_stories > 0 else 0
     fraud_percent = round(fraud_count / total_stories * 100, 1) if total_stories > 0 else 0
@@ -253,6 +349,31 @@ def generate_email_report(self, predictions_df, evaluation=None, predictions_pat
     
     top_fraud_stories = predictions_df[predictions_df['fraud_prediction'] == 1].sort_values(
         by='fraud_probability', ascending=False).head(5)
+    
+    # Generate pivot table for program impacts
+    pivot_analyzer = PivotAnalyzer()
+    program_impact_pivot = pivot_analyzer.generate_program_impact_pivot(predictions_df)
+    
+    # Convert pivot table to HTML for email
+    pivot_html = ""
+    has_pivot_data = False
+    
+    if program_impact_pivot is not None and not program_impact_pivot.empty:
+        has_pivot_data = True
+        # Get top 10 programs for email display
+        display_pivot = program_impact_pivot.head(10)
+        
+        # Create HTML with custom styling
+        pivot_html = display_pivot.to_html(
+            classes='pivot-table',
+            float_format=lambda x: f'{x:.1f}' if isinstance(x, float) else str(x)
+        )
+        
+        # Apply custom formatting to the HTML table
+        pivot_html = pivot_html.replace('<table', '<table style="width:100%; border-collapse:collapse; margin:15px 0;"')
+        pivot_html = pivot_html.replace('<th>', '<th style="background-color:#004080; color:white; padding:8px; text-align:left;">')
+        pivot_html = pivot_html.replace('<td>', '<td style="border:1px solid #ddd; padding:8px;">')
+        pivot_html = pivot_html.replace('<tr>', '<tr style="border-bottom:1px solid #ddd;">')
     
     # Prepare template data
     template_data = {
@@ -268,7 +389,9 @@ def generate_email_report(self, predictions_df, evaluation=None, predictions_pat
         'both_percent': both_percent,
         'any_percent': any_percent,
         'top_security_stories': top_security_stories.to_dict('records'),
-        'top_fraud_stories': top_fraud_stories.to_dict('records')
+        'top_fraud_stories': top_fraud_stories.to_dict('records'),
+        'has_pivot_data': has_pivot_data,
+        'pivot_html': pivot_html
     }
     
     # Add model performance metrics if available
@@ -370,7 +493,11 @@ def generate_email_report(self, predictions_df, evaluation=None, predictions_pat
 
 
 
-# Update in EmailReporter._create_email_template method - modify the template
+
+
+
+
+# Update the _create_email_template method in EmailReporter class to include pivot table section
 
 def _create_email_template(self):
     """Create the HTML email template if it doesn't exist."""
@@ -419,6 +546,21 @@ def _create_email_template(self):
                 .summary-table td {
                     border: 1px solid #ddd;
                     padding: 10px;
+                }
+                .pivot-table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 15px 0;
+                }
+                .pivot-table th {
+                    background-color: #004080;
+                    color: white;
+                    text-align: left;
+                    padding: 8px;
+                }
+                .pivot-table td {
+                    border: 1px solid #ddd;
+                    padding: 8px;
                 }
                 .charts {
                     text-align: center;
@@ -491,6 +633,22 @@ def _create_email_template(self):
                     </tr>
                 </table>
                 
+                {% if has_pivot_data %}
+                <h3>Program Impact Analysis</h3>
+                <p>The table below shows the distribution of security and fraud impacts across test programs:</p>
+                
+                {{ pivot_html|safe }}
+                
+                <p><em>Note: The full pivot table analysis is available in the attached Excel file.</em></p>
+                
+                <div class="charts">
+                    <h4>Program Impact Visualization</h4>
+                    <div class="chart">
+                        <img src="cid:program_impact_chart" alt="Program Impact Chart" style="max-width: 100%;">
+                    </div>
+                </div>
+                {% endif %}
+                
                 <h3>Model Performance</h3>
                 <p>The model achieved the following performance metrics:</p>
                 <table class="summary-table">
@@ -559,9 +717,12 @@ def _create_email_template(self):
 
 
 
-# Update the send_email_report method in EmailReporter class
 
-def send_email_report(self, recipients, subject, html_content, evaluation=None, predictions_path=None):
+
+
+# Update the send_email_report method in EmailReporter class to include pivot table chart
+
+def send_email_report(self, recipients, subject, html_content, evaluation=None, predictions_path=None, predictions_df=None):
     """
     Send email report with analysis results.
     
@@ -571,6 +732,7 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
         html_content (str): HTML content of the email
         evaluation (dict): Evaluation metrics (optional, for confusion matrix)
         predictions_path (str): Path to the Excel file with predictions (optional)
+        predictions_df (pandas.DataFrame): DataFrame with predictions (optional, for pivot table)
         
     Returns:
         bool: Success status
@@ -612,6 +774,44 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
         else:
             logger.info("No confusion matrices available to include in email")
         
+        # Generate and attach pivot table chart if predictions_df is provided
+        if predictions_df is not None and not predictions_df.empty:
+            try:
+                # Create pivot analyzer
+                from src.utils.pivot_analyzer import PivotAnalyzer
+                pivot_analyzer = PivotAnalyzer()
+                
+                # Generate pivot table
+                pivot_table = pivot_analyzer.generate_program_impact_pivot(predictions_df)
+                
+                if pivot_table is not None and not pivot_table.empty:
+                    # Generate chart image
+                    chart_image = pivot_analyzer.generate_pivot_chart_image(pivot_table)
+                    
+                    if chart_image:
+                        # Attach the chart image
+                        image = MIMEImage(chart_image)
+                        image.add_header('Content-ID', '<program_impact_chart>')
+                        image.add_header('Content-Disposition', 'inline')
+                        msg.attach(image)
+                        logger.info("Program impact chart attached to email")
+                        
+                        # Create and attach the pivot Excel file
+                        pivot_path = pivot_analyzer.create_pivot_excel(pivot_table)
+                        if pivot_path and os.path.exists(pivot_path):
+                            with open(pivot_path, 'rb') as f:
+                                pivot_attachment = MIMEApplication(f.read(), _subtype='xlsx')
+                                pivot_attachment.add_header('Content-Disposition', 'attachment', 
+                                                         filename='program_impact_analysis.xlsx')
+                                msg.attach(pivot_attachment)
+                                logger.info("Pivot table Excel file attached to email")
+                    else:
+                        logger.warning("Failed to generate program impact chart")
+                else:
+                    logger.warning("No valid pivot table data to include in email")
+            except Exception as e:
+                logger.error(f"Error generating pivot table chart: {e}")
+        
         # Attach Excel file if provided
         if predictions_path and os.path.exists(predictions_path):
             try:
@@ -643,3 +843,152 @@ def send_email_report(self, recipients, subject, html_content, evaluation=None, 
     except Exception as e:
         logger.error(f"Failed to send email report: {e}")
         return False
+
+
+
+
+
+
+
+
+# Update the predict_and_analyze function in main.py to pass predictions_df to email reporter
+
+def predict_and_analyze(model_trainer, input_data, nltk_data_path=None, exclude_columns=None, 
+                        hidden_columns=None, send_email=False, email_recipients=None, 
+                        email_subject=None, evaluation=None):
+    """
+    Make predictions and analyze data.
+    
+    Args:
+        model_trainer (ModelTrainer): Trained model instance
+        input_data: Input data (DataFrame or path to file)
+        nltk_data_path (str): Path to NLTK data directory
+        exclude_columns (list): Columns to exclude from Excel output
+        hidden_columns (list): Columns to hide in Excel output
+        send_email (bool): Whether to send email report
+        email_recipients (list): List of email recipients
+        email_subject (str): Email subject
+        evaluation (dict): Evaluation metrics from model training (optional)
+        
+    Returns:
+        tuple: (predictions_df, predictions_path, template_path)
+    """
+    logger.info("Running predictions and analysis")
+    
+    # Set default values if None
+    exclude_columns = exclude_columns or []
+    hidden_columns = hidden_columns or []
+    
+    # Update feature engineer if NLTK data path is provided
+    if nltk_data_path:
+        model_trainer.feature_engineer = FeatureEngineer(nltk_data_path)
+    
+    # Convert input_data to DataFrame if it's a file path
+    if isinstance(input_data, str):
+        input_df = pd.read_excel(input_data)
+    else:
+        input_df = input_data
+    
+    # Make predictions
+    predictions_df = model_trainer.predict_on_new_data(input_df)
+    
+    # Export predictions to Excel
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    predictions_path = os.path.join(
+        PROCESSED_DATA_PATH, 
+        f"security_fraud_predictions_{timestamp}.xlsx"
+    )
+    export_predictions_to_excel(
+        predictions_df, 
+        predictions_path,
+        exclude_columns=exclude_columns,
+        hidden_columns=hidden_columns
+    )
+    
+    # Generate feedback template
+    template_path = os.path.join(
+        PROCESSED_DATA_PATH, 
+        f"feedback_template_{timestamp}.xlsx"
+    )
+    generate_feedback_template(predictions_df, template_path)
+    
+    logger.info(f"Predictions saved to {predictions_path}")
+    logger.info(f"Feedback template saved to {template_path}")
+    
+    # Generate pivot table analysis
+    try:
+        from src.utils.pivot_analyzer import PivotAnalyzer
+        pivot_analyzer = PivotAnalyzer()
+        program_impact_pivot = pivot_analyzer.generate_program_impact_pivot(predictions_df)
+        
+        if program_impact_pivot is not None and not program_impact_pivot.empty:
+            pivot_path = pivot_analyzer.create_pivot_excel(program_impact_pivot)
+            if pivot_path:
+                logger.info(f"Program impact pivot table saved to {pivot_path}")
+    except Exception as e:
+        logger.error(f"Error generating pivot table: {e}")
+    
+    # Generate and send email report if requested
+    if send_email:
+        try:
+            # Use default recipients if none provided
+            recipients = email_recipients or EMAIL_SETTINGS.get('default_recipients')
+            if not recipients:
+                logger.warning("No email recipients specified. Email report will not be sent.")
+            else:
+                # Create email reporter
+                email_reporter = EmailReporter(
+                    smtp_server=EMAIL_SETTINGS.get('smtp_server'),
+                    smtp_port=EMAIL_SETTINGS.get('smtp_port'),
+                    username=EMAIL_SETTINGS.get('username'),
+                    password=EMAIL_SETTINGS.get('password'),
+                    sender_email=EMAIL_SETTINGS.get('sender_email')
+                )
+                
+                # Generate and send email report
+                html_content = email_reporter.generate_email_report(
+                    predictions_df, 
+                    evaluation=evaluation,
+                    predictions_path=predictions_path
+                )
+                
+                subject = email_subject or "Jira Security & Fraud Analysis Report"
+                
+                success = email_reporter.send_email_report(
+                    recipients=recipients,
+                    subject=subject,
+                    html_content=html_content,
+                    evaluation=evaluation,
+                    predictions_path=predictions_path,
+                    predictions_df=predictions_df  # Pass the predictions DataFrame for pivot table
+                )
+                
+                if success:
+                    logger.info(f"Email report sent to: {', '.join(recipients)}")
+                else:
+                    logger.error("Failed to send email report.")
+        except Exception as e:
+            logger.error(f"Error sending email report: {e}")
+    
+    # Summary statistics
+    security_count = predictions_df['security_prediction'].sum()
+    fraud_count = predictions_df['fraud_prediction'].sum()
+    both_count = ((predictions_df['security_prediction'] == 1) & 
+                  (predictions_df['fraud_prediction'] == 1)).sum()
+    any_count = ((predictions_df['security_prediction'] == 1) | 
+                 (predictions_df['fraud_prediction'] == 1)).sum()
+    
+    logger.info(f"Analysis Summary:")
+    logger.info(f"Total user stories analyzed: {len(predictions_df)}")
+    logger.info(f"User stories with security impacts: {security_count} ({security_count/len(predictions_df)*100:.1f}%)")
+    logger.info(f"User stories with fraud impacts: {fraud_count} ({fraud_count/len(predictions_df)*100:.1f}%)")
+    logger.info(f"User stories with both security and fraud impacts: {both_count} ({both_count/len(predictions_df)*100:.1f}%)")
+    logger.info(f"User stories with any security or fraud impact: {any_count} ({any_count/len(predictions_df)*100:.1f}%)")
+    
+    return predictions_df, predictions_path, template_path
+
+
+
+
+
+
