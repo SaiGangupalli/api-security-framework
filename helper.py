@@ -1,828 +1,1116 @@
-jira-report-generator/
-├── requirements.txt
-├── .env.example
-├── config/
-│   ├── __init__.py
-│   └── settings.py
-├── src/
-│   ├── __init__.py
-│   ├── jira_client.py
-│   ├── ai_analyzer.py
-│   ├── document_generator.py
-│   ├── email_service.py
-│   └── main.py
-├── templates/
-│   ├── email_template.html
-│   └── document_template.py
-├── output/
-│   └── .gitkeep
-└── README.md
-
-# requirements.txt
 requests==2.31.0
 python-docx==0.8.11
+openai==1.3.7
+smtplib-ssl==1.0.0
+email-validator==2.1.0
 python-dotenv==1.0.0
-openai==1.3.0
-smtplib2==0.2.1
-jinja2==3.1.2
-Pillow==10.0.1
+jira==3.5.0
 beautifulsoup4==4.12.2
+lxml==4.9.4
 
-# .env.example
-JIRA_BASE_URL=https://your-company.atlassian.net
-JIRA_USERNAME=your-email@company.com
-JIRA_API_TOKEN=your-jira-api-token
-JIRA_STORY_KEYS=PROJ-123,PROJ-124,PROJ-125
-OPENAI_API_KEY=your-openai-api-key
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your-email@gmail.com
-SMTP_PASSWORD=your-app-password
-RECIPIENT_EMAIL=recipient@company.com
-SENDER_NAME=Jira Report Generator
 
-# config/__init__.py
-# Empty file to make config a package
 
-# config/settings.py
+"""
+Configuration file for Jira Analysis System
+"""
 import os
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
-class Settings:
-    # Jira Configuration
-    JIRA_BASE_URL = os.getenv('JIRA_BASE_URL')
-    JIRA_USERNAME = os.getenv('JIRA_USERNAME')
-    JIRA_API_TOKEN = os.getenv('JIRA_API_TOKEN')
-    JIRA_STORY_KEYS = os.getenv('JIRA_STORY_KEYS', '').split(',')
-    
-    # AI Configuration
-    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    
-    # Email Configuration
-    SMTP_SERVER = os.getenv('SMTP_SERVER')
-    SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
-    SMTP_USERNAME = os.getenv('SMTP_USERNAME')
-    SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
-    RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
-    SENDER_NAME = os.getenv('SENDER_NAME', 'Jira Report Generator')
-    
-    # Output Configuration
-    OUTPUT_DIR = 'output'
-    
-    def validate(self):
-        """Validate that all required settings are present"""
-        required_settings = [
-            'JIRA_BASE_URL', 'JIRA_USERNAME', 'JIRA_API_TOKEN',
-            'OPENAI_API_KEY', 'SMTP_SERVER', 'SMTP_USERNAME',
-            'SMTP_PASSWORD', 'RECIPIENT_EMAIL'
-        ]
-        
-        missing = []
-        for setting in required_settings:
-            if not getattr(self, setting):
-                missing.append(setting)
-        
-        if missing:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
-        
-        if not self.JIRA_STORY_KEYS or self.JIRA_STORY_KEYS == ['']:
-            raise ValueError("JIRA_STORY_KEYS environment variable is required")
+# Jira Configuration
+JIRA_URL = os.getenv('JIRA_URL')  # e.g., 'https://yourcompany.atlassian.net'
+JIRA_USERNAME = os.getenv('JIRA_USERNAME')
+JIRA_API_TOKEN = os.getenv('JIRA_API_TOKEN')
 
-settings = Settings()
+# OpenAI Configuration
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# src/__init__.py
-# Empty file to make src a package
+# Email Configuration
+SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SENDER_EMAIL = os.getenv('SENDER_EMAIL')
+SENDER_PASSWORD = os.getenv('SENDER_PASSWORD')  # App password for Gmail
 
-# src/jira_client.py
+# LLM Prompts
+SUMMARY_PROMPT = """
+Analyze the following Jira story details and provide a comprehensive summary:
+
+Title: {title}
+Description: {description}
+Acceptance Criteria: {acceptance_criteria}
+Attachments Summary: {attachments_summary}
+
+Please provide:
+1. A concise summary of the requirement
+2. Key functional points
+3. Technical considerations
+4. Business value
+5. Implementation complexity (Low/Medium/High)
+
+Format your response in a structured manner.
+"""
+
+FRAUD_SECURITY_PROMPT = """
+Analyze the following Jira story for potential fraud and security considerations:
+
+Title: {title}
+Description: {description}
+Acceptance Criteria: {acceptance_criteria}
+
+Please identify:
+1. Potential fraud scenarios that could arise
+2. Security vulnerabilities or risks
+3. Recommended security controls
+4. Data protection considerations
+5. Compliance requirements (if any)
+6. Risk level assessment (Low/Medium/High)
+
+If no significant fraud or security concerns are identified, please state that clearly.
+Format your response in a structured manner.
+"""
+
+
+
+
+
+"""
+Jira Client for extracting issue details
+"""
 import requests
+from jira import JIRA
 import base64
-import json
+from bs4 import BeautifulSoup
+import logging
 from typing import Dict, List, Optional
-from config.settings import settings
 
 class JiraClient:
-    def __init__(self):
-        self.base_url = settings.JIRA_BASE_URL
-        self.username = settings.JIRA_USERNAME
-        self.api_token = settings.JIRA_API_TOKEN
+    def __init__(self, url: str, username: str, api_token: str):
+        self.url = url
+        self.username = username
+        self.api_token = api_token
         self.session = requests.Session()
+        self.session.auth = (username, api_token)
         
-        # Set up basic authentication
-        auth_string = f"{self.username}:{self.api_token}"
-        auth_bytes = auth_string.encode('ascii')
-        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
-        
-        self.session.headers.update({
-            'Authorization': f'Basic {auth_b64}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        })
-    
-    def get_issue(self, issue_key: str) -> Optional[Dict]:
-        """Fetch a single Jira issue by key"""
+        # Initialize JIRA client
         try:
-            url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
-            params = {
-                'expand': 'attachments,changelog,comments'
+            self.jira = JIRA(server=url, basic_auth=(username, api_token))
+        except Exception as e:
+            logging.error(f"Failed to initialize JIRA client: {e}")
+            raise
+    
+    def extract_issue_details(self, issue_key: str) -> Dict:
+        """
+        Extract comprehensive details from a Jira issue
+        """
+        try:
+            issue = self.jira.issue(issue_key, expand='attachment')
+            
+            # Extract basic details
+            summary = issue.fields.summary
+            description = self._clean_html(issue.fields.description or "")
+            
+            # Extract acceptance criteria (often in description or custom field)
+            acceptance_criteria = self._extract_acceptance_criteria(issue)
+            
+            # Extract attachments
+            attachments_info = self._extract_attachments(issue)
+            
+            return {
+                'key': issue_key,
+                'summary': summary,
+                'description': description,
+                'acceptance_criteria': acceptance_criteria,
+                'attachments': attachments_info,
+                'status': str(issue.fields.status),
+                'assignee': str(issue.fields.assignee) if issue.fields.assignee else "Unassigned",
+                'reporter': str(issue.fields.reporter) if issue.fields.reporter else "Unknown",
+                'created': str(issue.fields.created),
+                'updated': str(issue.fields.updated),
+                'priority': str(issue.fields.priority) if issue.fields.priority else "Not Set",
+                'issue_type': str(issue.fields.issuetype)
             }
             
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
+        except Exception as e:
+            logging.error(f"Error extracting details for {issue_key}: {e}")
+            return {
+                'key': issue_key,
+                'error': str(e),
+                'summary': f"Error fetching {issue_key}",
+                'description': f"Failed to fetch issue details: {e}",
+                'acceptance_criteria': "",
+                'attachments': []
+            }
+    
+    def _clean_html(self, text: str) -> str:
+        """Clean HTML content from Jira fields"""
+        if not text:
+            return ""
+        
+        try:
+            soup = BeautifulSoup(text, 'html.parser')
+            return soup.get_text(strip=True)
+        except:
+            return text
+    
+    def _extract_acceptance_criteria(self, issue) -> str:
+        """
+        Extract acceptance criteria from various possible fields
+        """
+        acceptance_criteria = ""
+        
+        # Check common custom fields for acceptance criteria
+        try:
+            # Try common custom field names
+            custom_fields = ['customfield_10100', 'customfield_10200', 'customfield_10300']
             
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching issue {issue_key}: {e}")
-            return None
+            for field in custom_fields:
+                if hasattr(issue.fields, field):
+                    field_value = getattr(issue.fields, field)
+                    if field_value and 'acceptance' in str(field_value).lower():
+                        acceptance_criteria = self._clean_html(str(field_value))
+                        break
+            
+            # If not found in custom fields, look in description
+            if not acceptance_criteria and issue.fields.description:
+                desc_text = self._clean_html(issue.fields.description)
+                lines = desc_text.split('\n')
+                
+                capture = False
+                ac_lines = []
+                
+                for line in lines:
+                    line_lower = line.lower().strip()
+                    if any(keyword in line_lower for keyword in ['acceptance criteria', 'acceptance', 'ac:']):
+                        capture = True
+                        if ':' in line:
+                            ac_lines.append(line.split(':', 1)[1].strip())
+                        continue
+                    
+                    if capture:
+                        if line.strip() and not line_lower.startswith(('description', 'summary', 'notes')):
+                            ac_lines.append(line.strip())
+                        elif not line.strip() and ac_lines:
+                            break
+                
+                acceptance_criteria = '\n'.join(ac_lines)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting acceptance criteria: {e}")
+        
+        return acceptance_criteria or "No acceptance criteria found"
     
-    def get_issues(self, issue_keys: List[str]) -> List[Dict]:
-        """Fetch multiple Jira issues"""
-        issues = []
-        for key in issue_keys:
-            key = key.strip()
-            if key:
-                issue = self.get_issue(key)
-                if issue:
-                    issues.append(issue)
-        return issues
-    
-    def get_attachment_content(self, attachment_url: str) -> Optional[bytes]:
-        """Download attachment content"""
+    def _extract_attachments(self, issue) -> List[Dict]:
+        """
+        Extract attachment information and content
+        """
+        attachments_info = []
+        
         try:
-            response = self.session.get(attachment_url)
-            response.raise_for_status()
-            return response.content
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading attachment: {e}")
-            return None
+            for attachment in issue.fields.attachment:
+                att_info = {
+                    'filename': attachment.filename,
+                    'size': attachment.size,
+                    'created': str(attachment.created),
+                    'author': str(attachment.author),
+                    'content_summary': ""
+                }
+                
+                # Try to read attachment content if it's a text file
+                if attachment.filename.lower().endswith(('.txt', '.md', '.doc', '.docx')):
+                    try:
+                        att_content = attachment.get()
+                        if len(att_content) < 10000:  # Only for small files
+                            att_info['content_summary'] = att_content[:500] + "..." if len(att_content) > 500 else att_content
+                    except:
+                        att_info['content_summary'] = "Could not read file content"
+                
+                attachments_info.append(att_info)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting attachments: {e}")
+        
+        return attachments_info
     
-    def parse_issue_data(self, issue: Dict) -> Dict:
-        """Parse Jira issue data into a structured format"""
-        fields = issue.get('fields', {})
-        
-        # Extract attachments info
-        attachments = []
-        for attachment in fields.get('attachment', []):
-            attachments.append({
-                'filename': attachment.get('filename'),
-                'content_type': attachment.get('mimeType'),
-                'size': attachment.get('size'),
-                'url': attachment.get('content'),
-                'created': attachment.get('created')
-            })
-        
-        # Extract labels
-        labels = fields.get('labels', [])
-        
-        # Extract custom fields that might contain acceptance criteria
-        acceptance_criteria = (
-            fields.get('customfield_10000', '') or  # Common AC field
-            fields.get('acceptance_criteria', '') or
-            ''
-        )
-        
-        return {
-            'key': issue.get('key'),
-            'summary': fields.get('summary', ''),
-            'description': fields.get('description', {}).get('content', [{}])[0].get('content', [{}])[0].get('text', '') if fields.get('description') else '',
-            'acceptance_criteria': acceptance_criteria,
-            'labels': labels,
-            'status': fields.get('status', {}).get('name', ''),
-            'priority': fields.get('priority', {}).get('name', ''),
-            'issue_type': fields.get('issuetype', {}).get('name', ''),
-            'assignee': fields.get('assignee', {}).get('displayName', 'Unassigned') if fields.get('assignee') else 'Unassigned',
-            'reporter': fields.get('reporter', {}).get('displayName', ''),
-            'created': fields.get('created', ''),
-            'updated': fields.get('updated', ''),
-            'attachments': attachments
-        }
+    def validate_connection(self) -> bool:
+        """Validate Jira connection"""
+        try:
+            self.jira.myself()
+            return True
+        except Exception as e:
+            logging.error(f"Jira connection validation failed: {e}")
+            return False
 
-# src/ai_analyzer.py
+
+
+
+
+
+"""
+LLM Analyzer for processing Jira issues
+"""
 import openai
+import logging
 from typing import Dict, List
-from config.settings import settings
+from config import OPENAI_API_KEY, SUMMARY_PROMPT, FRAUD_SECURITY_PROMPT
 
-class AIAnalyzer:
-    def __init__(self):
-        openai.api_key = settings.OPENAI_API_KEY
+class LLMAnalyzer:
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or OPENAI_API_KEY
+        openai.api_key = self.api_key
+        self.client = openai.OpenAI(api_key=self.api_key)
     
-    def analyze_fraud_security_risks(self, issue_data: Dict) -> Dict:
-        """Analyze Jira issue for fraud and security implications"""
-        
-        prompt = self._create_analysis_prompt(issue_data)
-        
+    def analyze_issue_summary(self, issue_data: Dict) -> str:
+        """
+        Generate comprehensive summary using LLM
+        """
         try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
+            # Prepare attachments summary
+            attachments_summary = ""
+            if issue_data.get('attachments'):
+                attachments_summary = f"Attachments ({len(issue_data['attachments'])}): "
+                for att in issue_data['attachments']:
+                    attachments_summary += f"{att['filename']} ({att.get('content_summary', 'No content available')}); "
+            else:
+                attachments_summary = "No attachments"
+            
+            prompt = SUMMARY_PROMPT.format(
+                title=issue_data.get('summary', ''),
+                description=issue_data.get('description', ''),
+                acceptance_criteria=issue_data.get('acceptance_criteria', ''),
+                attachments_summary=attachments_summary
+            )
+            
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a cybersecurity and fraud prevention expert. Analyze the provided Jira story and identify potential fraud and security risks, vulnerabilities, and recommended mitigations."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    {"role": "system", "content": "You are a business analyst expert in analyzing software requirements."},
+                    {"role": "user", "content": prompt}
                 ],
                 max_tokens=1000,
                 temperature=0.3
             )
             
-            analysis_text = response.choices[0].message.content
-            return self._parse_analysis_response(analysis_text)
+            return response.choices[0].message.content.strip()
             
         except Exception as e:
-            print(f"AI Analysis Error: {e}")
-            return {
-                'security_risks': ['Unable to analyze - AI service unavailable'],
-                'fraud_risks': ['Unable to analyze - AI service unavailable'],
-                'recommendations': ['Manual security review recommended'],
-                'risk_level': 'Unknown'
-            }
+            logging.error(f"Error in LLM analysis for summary: {e}")
+            return f"Error analyzing issue: {str(e)}"
     
-    def _create_analysis_prompt(self, issue_data: Dict) -> str:
-        """Create analysis prompt for AI"""
-        return f"""
-        Please analyze the following Jira story for potential fraud and security risks:
-
-        **Story Key:** {issue_data['key']}
-        **Summary:** {issue_data['summary']}
-        **Description:** {issue_data['description']}
-        **Acceptance Criteria:** {issue_data['acceptance_criteria']}
-        **Labels:** {', '.join(issue_data['labels'])}
-        **Issue Type:** {issue_data['issue_type']}
-        **Priority:** {issue_data['priority']}
-
-        Please provide analysis in the following format:
-        
-        **SECURITY RISKS:**
-        - [List specific security vulnerabilities or concerns]
-        
-        **FRAUD RISKS:**
-        - [List potential fraud scenarios or risks]
-        
-        **RECOMMENDATIONS:**
-        - [List specific security/fraud prevention measures]
-        
-        **RISK LEVEL:** [High/Medium/Low]
-        
-        Focus on:
-        1. Data privacy and protection concerns
-        2. Authentication and authorization vulnerabilities
-        3. Input validation and injection risks
-        4. Financial transaction security
-        5. User identity verification
-        6. Audit trail and logging requirements
-        7. Compliance considerations (GDPR, PCI-DSS, etc.)
+    def analyze_fraud_security(self, issue_data: Dict) -> str:
         """
+        Analyze fraud and security implications using LLM
+        """
+        try:
+            prompt = FRAUD_SECURITY_PROMPT.format(
+                title=issue_data.get('summary', ''),
+                description=issue_data.get('description', ''),
+                acceptance_criteria=issue_data.get('acceptance_criteria', '')
+            )
+            
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a cybersecurity expert specializing in fraud prevention and security analysis."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=800,
+                temperature=0.2
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logging.error(f"Error in fraud/security analysis: {e}")
+            return f"Error analyzing fraud/security aspects: {str(e)}"
     
-    def _parse_analysis_response(self, response_text: str) -> Dict:
-        """Parse AI response into structured data"""
-        analysis = {
-            'security_risks': [],
-            'fraud_risks': [],
-            'recommendations': [],
-            'risk_level': 'Medium'
-        }
-        
-        current_section = None
-        lines = response_text.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            if '**SECURITY RISKS:**' in line.upper():
-                current_section = 'security_risks'
-            elif '**FRAUD RISKS:**' in line.upper():
-                current_section = 'fraud_risks'
-            elif '**RECOMMENDATIONS:**' in line.upper():
-                current_section = 'recommendations'
-            elif '**RISK LEVEL:**' in line.upper():
-                risk_level = line.split(':')[-1].strip()
-                analysis['risk_level'] = risk_level
-            elif line.startswith('-') and current_section:
-                analysis[current_section].append(line[1:].strip())
-        
-        return analysis
+    def generate_executive_summary(self, all_issues: List[Dict]) -> str:
+        """
+        Generate an executive summary of all analyzed issues
+        """
+        try:
+            issues_summary = ""
+            for issue in all_issues:
+                issues_summary += f"- {issue['key']}: {issue['summary']}\n"
+            
+            prompt = f"""
+            Based on the following Jira issues, provide an executive summary:
+            
+            Issues Analyzed:
+            {issues_summary}
+            
+            Please provide:
+            1. Overall project scope and objectives
+            2. Key deliverables and features
+            3. High-level risk assessment
+            4. Resource and timeline considerations
+            5. Strategic recommendations
+            
+            Keep it concise but comprehensive for executive leadership.
+            """
+            
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a senior project manager providing executive briefings."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=600,
+                temperature=0.3
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logging.error(f"Error generating executive summary: {e}")
+            return f"Error generating executive summary: {str(e)}"
 
-# src/document_generator.py
-import os
-from datetime import datetime
+
+
+
+
+
+"""
+Document Generator for creating Word documents
+"""
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.shared import OxmlElement, qn
+import logging
 from typing import List, Dict
-from config.settings import settings
+from datetime import datetime
 
 class DocumentGenerator:
     def __init__(self):
-        self.output_dir = settings.OUTPUT_DIR
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.doc = Document()
+        self._setup_document_styles()
     
-    def generate_report(self, issues_data: List[Dict], analyses: List[Dict]) -> str:
-        """Generate Word document with Jira stories and AI analysis"""
+    def _setup_document_styles(self):
+        """Setup document styles and formatting"""
+        # Add title style
+        styles = self.doc.styles
         
-        # Create document
-        doc = Document()
-        
-        # Add title
-        title = doc.add_heading('Jira Stories Security & Fraud Analysis Report', 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Add metadata
-        doc.add_paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        doc.add_paragraph(f"Total Stories Analyzed: {len(issues_data)}")
-        doc.add_paragraph("")
-        
-        # Add executive summary
-        self._add_executive_summary(doc, analyses)
-        
-        # Add individual story analyses
-        for i, (issue, analysis) in enumerate(zip(issues_data, analyses)):
-            self._add_story_section(doc, issue, analysis, i + 1)
-        
-        # Save document
-        filename = f"jira_security_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-        filepath = os.path.join(self.output_dir, filename)
-        doc.save(filepath)
-        
-        return filepath
-    
-    def _add_executive_summary(self, doc: Document, analyses: List[Dict]):
-        """Add executive summary section"""
-        doc.add_heading('Executive Summary', level=1)
-        
-        # Risk level distribution
-        risk_levels = {'High': 0, 'Medium': 0, 'Low': 0, 'Unknown': 0}
-        for analysis in analyses:
-            risk_level = analysis.get('risk_level', 'Unknown')
-            risk_levels[risk_level] = risk_levels.get(risk_level, 0) + 1
-        
-        doc.add_paragraph("Risk Level Distribution:")
-        for level, count in risk_levels.items():
-            if count > 0:
-                doc.add_paragraph(f"  • {level} Risk: {count} stories", style='List Bullet')
-        
-        doc.add_paragraph("")
-        
-        # Common risks
-        all_security_risks = []
-        all_fraud_risks = []
-        
-        for analysis in analyses:
-            all_security_risks.extend(analysis.get('security_risks', []))
-            all_fraud_risks.extend(analysis.get('fraud_risks', []))
-        
-        if all_security_risks:
-            doc.add_paragraph("Most Common Security Concerns:")
-            unique_risks = list(set(all_security_risks))[:5]  # Top 5 unique risks
-            for risk in unique_risks:
-                doc.add_paragraph(f"  • {risk}", style='List Bullet')
-        
-        doc.add_page_break()
-    
-    def _add_story_section(self, doc: Document, issue: Dict, analysis: Dict, story_number: int):
-        """Add individual story section"""
-        
-        # Story header
-        header = doc.add_heading(f"Story {story_number}: {issue['key']}", level=1)
-        
-        # Story details table
-        table = doc.add_table(rows=8, cols=2)
-        table.style = 'Table Grid'
-        
-        # Populate table
-        details = [
-            ('Summary', issue['summary']),
-            ('Description', issue['description'][:500] + '...' if len(issue['description']) > 500 else issue['description']),
-            ('Acceptance Criteria', issue['acceptance_criteria'][:300] + '...' if len(issue['acceptance_criteria']) > 300 else issue['acceptance_criteria']),
-            ('Labels', ', '.join(issue['labels'])),
-            ('Priority', issue['priority']),
-            ('Status', issue['status']),
-            ('Assignee', issue['assignee']),
-            ('Attachments', f"{len(issue['attachments'])} files" if issue['attachments'] else 'None')
-        ]
-        
-        for i, (label, value) in enumerate(details):
-            table.cell(i, 0).text = label
-            table.cell(i, 1).text = str(value) if value else 'N/A'
-            
-            # Make label column bold
-            table.cell(i, 0).paragraphs[0].runs[0].font.bold = True
-        
-        doc.add_paragraph("")
-        
-        # Security Analysis
-        doc.add_heading('Security & Fraud Analysis', level=2)
-        
-        # Risk Level
-        risk_para = doc.add_paragraph()
-        risk_para.add_run('Risk Level: ').bold = True
-        risk_run = risk_para.add_run(analysis['risk_level'])
-        
-        # Color code risk level
-        if analysis['risk_level'] == 'High':
-            risk_run.font.color.rgb = None  # Red - note: python-docx color handling
-        elif analysis['risk_level'] == 'Medium':
-            risk_run.font.color.rgb = None  # Orange
-        
-        doc.add_paragraph("")
-        
-        # Security Risks
-        if analysis['security_risks']:
-            doc.add_heading('Security Risks Identified:', level=3)
-            for risk in analysis['security_risks']:
-                doc.add_paragraph(f"• {risk}", style='List Bullet')
-        
-        # Fraud Risks  
-        if analysis['fraud_risks']:
-            doc.add_heading('Fraud Risks Identified:', level=3)
-            for risk in analysis['fraud_risks']:
-                doc.add_paragraph(f"• {risk}", style='List Bullet')
-        
-        # Recommendations
-        if analysis['recommendations']:
-            doc.add_heading('Recommendations:', level=3)
-            for rec in analysis['recommendations']:
-                doc.add_paragraph(f"• {rec}", style='List Bullet')
-        
-        # Add attachments info if available
-        if issue['attachments']:
-            doc.add_heading('Attachments:', level=3)
-            for attachment in issue['attachments']:
-                doc.add_paragraph(f"• {attachment['filename']} ({attachment['content_type']}, {attachment['size']} bytes)")
-        
-        doc.add_page_break()
-
-# src/email_service.py
-import smtplib
-import os
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from jinja2 import Template
-from typing import List, Dict
-from config.settings import settings
-
-class EmailService:
-    def __init__(self):
-        self.smtp_server = settings.SMTP_SERVER
-        self.smtp_port = settings.SMTP_PORT
-        self.username = settings.SMTP_USERNAME
-        self.password = settings.SMTP_PASSWORD
-        self.sender_name = settings.SENDER_NAME
-    
-    def send_report(self, document_path: str, issues_data: List[Dict], analyses: List[Dict]) -> bool:
-        """Send the generated report via email"""
+        # Create or modify heading styles
+        try:
+            heading1 = styles['Heading 1']
+            heading1.font.size = Pt(16)
+            heading1.font.bold = True
+        except:
+            pass
         
         try:
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['From'] = f"{self.sender_name} <{self.username}>"
-            msg['To'] = settings.RECIPIENT_EMAIL
-            msg['Subject'] = f"Jira Security Analysis Report - {len(issues_data)} Stories Analyzed"
+            heading2 = styles['Heading 2']
+            heading2.font.size = Pt(14)
+            heading2.font.bold = True
+        except:
+            pass
+    
+    def create_comprehensive_report(self, issues_data: List[Dict], 
+                                  executive_summary: str, 
+                                  output_filename: str = "jira_analysis_report.docx") -> str:
+        """
+        Create a comprehensive analysis report
+        """
+        try:
+            # Document Header
+            self._add_document_header()
             
-            # Create HTML email body
-            html_body = self._create_html_body(issues_data, analyses)
-            html_part = MIMEText(html_body, 'html')
-            msg.attach(html_part)
+            # Executive Summary
+            self._add_executive_summary(executive_summary)
             
-            # Attach document
-            if os.path.exists(document_path):
-                with open(document_path, "rb") as attachment:
-                    part = MIMEBase('application', 'octet-stream')
-                    part.set_payload(attachment.read())
-                    encoders.encode_base64(part)
-                    part.add_header(
-                        'Content-Disposition',
-                        f'attachment; filename= {os.path.basename(document_path)}'
-                    )
-                    msg.attach(part)
+            # Individual Issue Analysis
+            self._add_issues_analysis(issues_data)
             
-            # Send email
-            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
-            server.starttls()
-            server.login(self.username, self.password)
-            server.send_message(msg)
-            server.quit()
+            # Consolidated Fraud & Security Analysis
+            self._add_consolidated_security_analysis(issues_data)
             
-            return True
+            # Appendix
+            self._add_appendix(issues_data)
+            
+            # Save document
+            self.doc.save(output_filename)
+            logging.info(f"Document saved as {output_filename}")
+            return output_filename
             
         except Exception as e:
-            print(f"Email sending error: {e}")
-            return False
+            logging.error(f"Error creating document: {e}")
+            raise
     
-    def _create_html_body(self, issues_data: List[Dict], analyses: List[Dict]) -> str:
-        """Create beautiful HTML email body"""
+    def _add_document_header(self):
+        """Add document header and title"""
+        # Title
+        title = self.doc.add_heading('Jira Issues Analysis Report', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Calculate summary statistics
-        risk_stats = {'High': 0, 'Medium': 0, 'Low': 0}
-        for analysis in analyses:
-            risk_level = analysis.get('risk_level', 'Medium')
-            risk_stats[risk_level] = risk_stats.get(risk_level, 0) + 1
+        # Subtitle
+        subtitle = self.doc.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = subtitle.add_run('Comprehensive Analysis with Fraud & Security Assessment')
+        run.italic = True
+        run.font.size = Pt(12)
         
-        template_str = """
-        <!DOCTYPE html>
+        # Date and metadata
+        meta_para = self.doc.add_paragraph()
+        meta_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta_para.add_run(f'Generated on: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}')
+        
+        # Add page break
+        self.doc.add_page_break()
+    
+    def _add_executive_summary(self, executive_summary: str):
+        """Add executive summary section"""
+        self.doc.add_heading('Executive Summary', level=1)
+        
+        para = self.doc.add_paragraph(executive_summary)
+        para.space_after = Pt(12)
+        
+        self.doc.add_page_break()
+    
+    def _add_issues_analysis(self, issues_data: List[Dict]):
+        """Add detailed analysis for each issue"""
+        self.doc.add_heading('Detailed Issue Analysis', level=1)
+        
+        for i, issue in enumerate(issues_data, 1):
+            # Issue header
+            issue_heading = self.doc.add_heading(f"{i}. {issue['key']}: {issue['summary']}", level=2)
+            
+            # Basic Information Table
+            self._add_issue_info_table(issue)
+            
+            # LLM Analysis
+            if 'llm_summary' in issue:
+                self.doc.add_heading('Analysis Summary', level=3)
+                self.doc.add_paragraph(issue['llm_summary'])
+            
+            # Fraud & Security Analysis
+            if 'fraud_security_analysis' in issue:
+                self.doc.add_heading('Fraud & Security Assessment', level=3)
+                self.doc.add_paragraph(issue['fraud_security_analysis'])
+            
+            # Attachments
+            if issue.get('attachments'):
+                self.doc.add_heading('Attachments', level=3)
+                for att in issue['attachments']:
+                    att_para = self.doc.add_paragraph()
+                    att_para.add_run(f"• {att['filename']} ").bold = True
+                    att_para.add_run(f"(Size: {att['size']} bytes, Created: {att['created']})")
+                    if att.get('content_summary'):
+                        self.doc.add_paragraph(f"   Content: {att['content_summary']}")
+            
+            # Add separator
+            if i < len(issues_data):
+                self.doc.add_paragraph("_" * 80)
+                self.doc.add_paragraph()
+    
+    def _add_issue_info_table(self, issue: Dict):
+        """Add issue information table"""
+        table = self.doc.add_table(rows=0, cols=2)
+        table.style = 'Table Grid'
+        
+        info_items = [
+            ('Issue Key', issue['key']),
+            ('Status', issue.get('status', 'Unknown')),
+            ('Priority', issue.get('priority', 'Not Set')),
+            ('Type', issue.get('issue_type', 'Unknown')),
+            ('Assignee', issue.get('assignee', 'Unassigned')),
+            ('Reporter', issue.get('reporter', 'Unknown')),
+            ('Created', issue.get('created', 'Unknown')),
+            ('Updated', issue.get('updated', 'Unknown'))
+        ]
+        
+        for label, value in info_items:
+            row = table.add_row()
+            row.cells[0].text = label
+            row.cells[0].paragraphs[0].runs[0].bold = True
+            row.cells[1].text = str(value)
+        
+        self.doc.add_paragraph()
+        
+        # Description
+        if issue.get('description'):
+            self.doc.add_heading('Description', level=3)
+            self.doc.add_paragraph(issue['description'])
+        
+        # Acceptance Criteria
+        if issue.get('acceptance_criteria') and issue['acceptance_criteria'] != "No acceptance criteria found":
+            self.doc.add_heading('Acceptance Criteria', level=3)
+            self.doc.add_paragraph(issue['acceptance_criteria'])
+    
+    def _add_consolidated_security_analysis(self, issues_data: List[Dict]):
+        """Add consolidated fraud and security analysis"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Consolidated Fraud & Security Analysis', level=1)
+        
+        # Summary of all security concerns
+        high_risk_issues = []
+        medium_risk_issues = []
+        low_risk_issues = []
+        
+        for issue in issues_data:
+            fraud_analysis = issue.get('fraud_security_analysis', '')
+            if 'high' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                high_risk_issues.append(issue['key'])
+            elif 'medium' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                medium_risk_issues.append(issue['key'])
+            else:
+                low_risk_issues.append(issue['key'])
+        
+        # Risk Summary
+        self.doc.add_heading('Risk Level Summary', level=2)
+        
+        if high_risk_issues:
+            self.doc.add_paragraph().add_run('High Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(high_risk_issues))
+        
+        if medium_risk_issues:
+            self.doc.add_paragraph().add_run('Medium Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(medium_risk_issues))
+        
+        if low_risk_issues:
+            self.doc.add_paragraph().add_run('Low Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(low_risk_issues))
+        
+        # Detailed Security Recommendations
+        self.doc.add_heading('Security Recommendations', level=2)
+        
+        recommendations = [
+            "Implement comprehensive input validation and sanitization",
+            "Ensure proper authentication and authorization controls",
+            "Regular security testing and vulnerability assessments",
+            "Implement fraud detection and monitoring systems",
+            "Ensure compliance with relevant data protection regulations",
+            "Establish incident response procedures",
+            "Regular security awareness training for development team"
+        ]
+        
+        for rec in recommendations:
+            para = self.doc.add_paragraph()
+            para.add_run('• ').bold = True
+            para.add_run(rec)
+    
+    def _add_appendix(self, issues_data: List[Dict]):
+        """Add appendix with additional information"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Appendix', level=1)
+        
+        # Issue Summary Table
+        self.doc.add_heading('Issues Summary Table', level=2)
+        
+        table = self.doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        
+        # Header row
+        header_cells = table.rows[0].cells
+        header_cells[0].text = 'Issue Key'
+        header_cells[1].text = 'Summary'
+        header_cells[2].text = 'Status'
+        header_cells[3].text = 'Priority'
+        
+        for cell in header_cells:
+            cell.paragraphs[0].runs[0].bold = True
+        
+        # Data rows
+        for issue in issues_data:
+            row = table.add_row()
+            row.cells[0].text = issue['key']
+            row.cells[1].text = issue['summary'][:50] + '...' if len(issue['summary']) > 50 else issue['summary']
+            row.cells[2].text = issue.get('status', 'Unknown')
+            row.cells[3].text = issue.get('priority', 'Not Set')
+        
+        # Generation info
+        self.doc.add_paragraph()
+        self.doc.add_heading('Document Information', level=2)
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Total Issues Analyzed: ').bold = True
+        info_para.add_run(str(len(issues_data)))
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Generated by: ').bold = True
+        info_para.add_run('Jira Analysis System')
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Analysis Date: ').bold = True
+        info_para.add_run(datetime.now().strftime("%B %d, %Y"))
+    
+    def generate_html_summary(self, issues_data: List[Dict], executive_summary: str) -> str:
+        """Generate HTML summary for email"""
+        html_content = f"""
         <html>
         <head>
+            <title>Jira Analysis Report Summary</title>
             <style>
-                body { 
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-                    line-height: 1.6; 
-                    color: #333; 
-                    max-width: 800px; 
-                    margin: 0 auto; 
-                    padding: 20px;
-                    background-color: #f5f5f5;
-                }
-                .container {
-                    background-color: white;
-                    padding: 30px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                .header { 
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white; 
-                    padding: 30px; 
-                    text-align: center; 
-                    border-radius: 8px;
-                    margin-bottom: 30px;
-                }
-                .header h1 { margin: 0; font-size: 28px; }
-                .header p { margin: 10px 0 0 0; opacity: 0.9; }
-                .stats-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 20px;
-                    margin: 30px 0;
-                }
-                .stat-card {
-                    background: #f8f9fa;
-                    padding: 20px;
-                    border-radius: 8px;
-                    text-align: center;
-                    border-left: 4px solid #667eea;
-                }
-                .stat-number { font-size: 32px; font-weight: bold; color: #667eea; }
-                .stat-label { color: #666; margin-top: 5px; }
-                .risk-high { color: #dc3545; }
-                .risk-medium { color: #ffc107; }
-                .risk-low { color: #28a745; }
-                .story-summary {
-                    background: #f8f9fa;
-                    padding: 20px;
-                    border-radius: 8px;
-                    margin: 15px 0;
-                    border-left: 4px solid #007bff;
-                }
-                .story-key { font-weight: bold; color: #007bff; font-size: 16px; }
-                .story-title { margin: 5px 0; font-size: 14px; }
-                .risk-badge {
-                    display: inline-block;
-                    padding: 4px 12px;
-                    border-radius: 20px;
-                    font-size: 12px;
-                    font-weight: bold;
-                    text-transform: uppercase;
-                }
-                .risk-badge.high { background: #dc3545; color: white; }
-                .risk-badge.medium { background: #ffc107; color: #333; }
-                .risk-badge.low { background: #28a745; color: white; }
-                .footer {
-                    margin-top: 40px;
-                    padding-top: 20px;
-                    border-top: 1px solid #eee;
-                    color: #666;
-                    font-size: 14px;
-                }
-                .cta-button {
-                    display: inline-block;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    padding: 12px 30px;
-                    text-decoration: none;
-                    border-radius: 25px;
-                    margin: 20px 0;
-                    font-weight: bold;
-                }
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background-color: #f4f4f4; padding: 15px; border-radius: 5px; }}
+                .summary {{ background-color: #e8f4f8; padding: 15px; margin: 15px 0; border-radius: 5px; }}
+                .issue {{ border-left: 4px solid #007cba; padding-left: 15px; margin: 10px 0; }}
+                .high-risk {{ border-left-color: #d32f2f; }}
+                .medium-risk {{ border-left-color: #f57c00; }}
+                .low-risk {{ border-left-color: #388e3c; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
             </style>
         </head>
         <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🔒 Security Analysis Report</h1>
-                    <p>Jira Stories Security & Fraud Risk Assessment</p>
-                    <p>Generated on {{ current_date }}</p>
-                </div>
-                
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-number">{{ total_stories }}</div>
-                        <div class="stat-label">Stories Analyzed</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-number risk-high">{{ risk_stats.High }}</div>
-                        <div class="stat-label">High Risk</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-number risk-medium">{{ risk_stats.Medium }}</div>
-                        <div class="stat-label">Medium Risk</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-number risk-low">{{ risk_stats.Low }}</div>
-                        <div class="stat-label">Low Risk</div>
-                    </div>
-                </div>
-                
-                <h2>📋 Story Summary</h2>
-                {% for issue, analysis in story_data %}
-                <div class="story-summary">
-                    <div class="story-key">{{ issue.key }}</div>
-                    <div class="story-title">{{ issue.summary }}</div>
-                    <div style="margin-top: 10px;">
-                        <span class="risk-badge {{ analysis.risk_level.lower() }}">{{ analysis.risk_level }} Risk</span>
-                        {% if analysis.security_risks %}
-                        <span style="margin-left: 10px; color: #666; font-size: 12px;">
-                            🛡️ {{ analysis.security_risks|length }} Security Issues
-                        </span>
-                        {% endif %}
-                        {% if analysis.fraud_risks %}
-                        <span style="margin-left: 10px; color: #666; font-size: 12px;">
-                            ⚠️ {{ analysis.fraud_risks|length }} Fraud Risks
-                        </span>
-                        {% endif %}
-                    </div>
-                </div>
-                {% endfor %}
-                
-                <div style="text-align: center; margin: 40px 0;">
-                    <p>📎 <strong>Detailed analysis report is attached to this email</strong></p>
-                    <p style="color: #666;">The attached Word document contains comprehensive security and fraud risk analysis for each story.</p>
-                </div>
-                
-                <div class="footer">
-                    <p><strong>Next Steps:</strong></p>
-                    <ul>
-                        <li>Review high-risk stories immediately</li>
-                        <li>Implement recommended security measures</li>
-                        <li>Schedule security review meetings for critical items</li>
-                        <li>Update acceptance criteria to include security requirements</li>
-                    </ul>
-                    
-                    <p style="margin-top: 20px;">
-                        <em>This report was automatically generated using AI analysis. Please review all recommendations with your security team.</em>
-                    </p>
-                </div>
+            <div class="header">
+                <h1>Jira Issues Analysis Report</h1>
+                <p><strong>Generated:</strong> {datetime.now().strftime("%B %d, %Y at %I:%M %p")}</p>
+                <p><strong>Total Issues Analyzed:</strong> {len(issues_data)}</p>
             </div>
+            
+            <div class="summary">
+                <h2>Executive Summary</h2>
+                <p>{executive_summary.replace(chr(10), '<br>')}</p>
+            </div>
+            
+            <h2>Issues Overview</h2>
+            <table>
+                <tr>
+                    <th>Issue Key</th>
+                    <th>Summary</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Risk Level</th>
+                </tr>
+        """
+        
+        for issue in issues_data:
+            risk_level = "Low"
+            risk_class = "low-risk"
+            
+            fraud_analysis = issue.get('fraud_security_analysis', '').lower()
+            if 'high' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "High"
+                risk_class = "high-risk"
+            elif 'medium' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "Medium"
+                risk_class = "medium-risk"
+            
+            html_content += f"""
+                <tr class="{risk_class}">
+                    <td>{issue['key']}</td>
+                    <td>{issue['summary'][:60] + '...' if len(issue['summary']) > 60 else issue['summary']}</td>
+                    <td>{issue.get('status', 'Unknown')}</td>
+                    <td>{issue.get('priority', 'Not Set')}</td>
+                    <td>{risk_level}</td>
+                </tr>
+            """
+        
+        html_content += """
+            </table>
+            
+            <div class="summary">
+                <h3>Key Recommendations</h3>
+                <ul>
+                    <li>Review high-risk issues immediately</li>
+                    <li>Implement recommended security controls</li>
+                    <li>Conduct regular security assessments</li>
+                    <li>Ensure compliance with data protection requirements</li>
+                </ul>
+            </div>
+            
+            <p><em>Please find the detailed analysis report attached to this email.</em></p>
         </body>
         </html>
         """
         
-        template = Template(template_str)
-        
-        return template.render(
-            current_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            total_stories=len(issues_data),
-            risk_stats=risk_stats,
-            story_data=list(zip(issues_data, analyses))
-        )
+        return html_content
 
-# src/main.py
-import sys
+
+
+
+
+
+
+"""
+Email Sender for sending reports
+"""
+import smtplib
+import logging
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import os
+from typing import List
+from config import SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD
+
+class EmailSender:
+    def __init__(self, smtp_server: str = None, smtp_port: int = None, 
+                 sender_email: str = None, sender_password: str = None):
+        self.smtp_server = smtp_server or SMTP_SERVER
+        self.smtp_port = smtp_port or SMTP_PORT
+        self.sender_email = sender_email or SENDER_EMAIL
+        self.sender_password = sender_password or SENDER_PASSWORD
+    
+    def send_report_email(self, recipient_email: str, html_content: str, 
+                         attachment_path: str, jira_keys: List[str]) -> bool:
+        """
+        Send the analysis report via email
+        """
+        try:
+            # Create message
+            message = MIMEMultipart('mixed')
+            message['From'] = self.sender_email
+            message['To'] = recipient_email
+            message['Subject'] = f'Jira Analysis Report - {", ".join(jira_keys)}'
+            
+            # Create HTML part
+            html_part = MIMEText(html_content, 'html')
+            message.attach(html_part)
+            
+            # Add attachment
+            if os.path.exists(attachment_path):
+                with open(attachment_path, "rb") as attachment:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(attachment.read())
+                
+                encoders.encode_base64(part)
+                part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename= {os.path.basename(attachment_path)}'
+                )
+                message.attach(part)
+            else:
+                logging.warning(f"Attachment file not found: {attachment_path}")
+            
+            # Send email
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            
+            text = message.as_string()
+            server.sendmail(self.sender_email, recipient_email, text)
+            server.quit()
+            
+            logging.info(f"Email sent successfully to {recipient_email}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error sending email: {e}")
+            return False
+    
+    def validate_email_config(self) -> bool:
+        """Validate email configuration"""
+        try:
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            server.quit()
+            return True
+        except Exception as e:
+            logging.error(f"Email configuration validation failed: {e}")
+            return False
+
+
+
+"""
+Main script for Jira Analysis System
+"""
+import logging
+import os
+import sys
+from typing import List
+import re
 from datetime import datetime
-from config.settings import settings
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('jira_analysis.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# Import custom modules
 from jira_client import JiraClient
-from ai_analyzer import AIAnalyzer
+from llm_analyzer import LLMAnalyzer
 from document_generator import DocumentGenerator
-from email_service import EmailService
+from email_sender import EmailSender
+from config import JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN, OPENAI_API_KEY
+
+class JiraAnalysisSystem:
+    def __init__(self):
+        self.jira_client = None
+        self.llm_analyzer = None
+        self.doc_generator = None
+        self.email_sender = None
+        
+    def initialize_components(self):
+        """Initialize all system components"""
+        try:
+            # Initialize Jira client
+            if not all([JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN]):
+                raise ValueError("Jira configuration is incomplete. Please check your .env file.")
+            
+            self.jira_client = JiraClient(JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN)
+            if not self.jira_client.validate_connection():
+                raise ConnectionError("Failed to connect to Jira")
+            
+            # Initialize LLM analyzer
+            if not OPENAI_API_KEY:
+                raise ValueError("OpenAI API key is missing. Please check your .env file.")
+            
+            self.llm_analyzer = LLMAnalyzer(OPENAI_API_KEY)
+            
+            # Initialize document generator
+            self.doc_generator = DocumentGenerator()
+            
+            # Initialize email sender
+            self.email_sender = EmailSender()
+            
+            logging.info("All components initialized successfully")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to initialize components: {e}")
+            return False
+    
+    def get_jira_keys_from_user(self) -> List[str]:
+        """Get Jira keys from user input"""
+        while True:
+            try:
+                print("\n" + "="*60)
+                print("JIRA ANALYSIS SYSTEM")
+                print("="*60)
+                
+                jira_input = input("\nEnter Jira keys (comma-separated): ").strip()
+                
+                if not jira_input:
+                    print("❌ Please enter at least one Jira key.")
+                    continue
+                
+                # Split by comma and clean up
+                jira_keys = [key.strip().upper() for key in jira_input.split(',')]
+                
+                # Validate format (basic validation)
+                invalid_keys = []
+                valid_keys = []
+                
+                for key in jira_keys:
+                    if re.match(r'^[A-Z]+-\d+$', key):
+                        valid_keys.append(key)
+                    else:
+                        invalid_keys.append(key)
+                
+                if invalid_keys:
+                    print(f"❌ Invalid Jira key format: {', '.join(invalid_keys)}")
+                    print("   Jira keys should be in format: PROJECT-123")
+                    continue
+                
+                if valid_keys:
+                    print(f"✅ Valid Jira keys found: {', '.join(valid_keys)}")
+                    return valid_keys
+                
+            except KeyboardInterrupt:
+                print("\n❌ Operation cancelled by user.")
+                sys.exit(0)
+            except Exception as e:
+                print(f"❌ Error processing input: {e}")
+                continue
+    
+    def get_email_from_user(self) -> str:
+        """Get recipient email from user input"""
+        while True:
+            try:
+                email = input("\nEnter recipient email address: ").strip()
+                
+                if not email:
+                    print("❌ Please enter an email address.")
+                    continue
+                
+                # Basic email validation
+                if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+                    print(f"✅ Email address validated: {email}")
+                    return email
+                else:
+                    print("❌ Invalid email format. Please enter a valid email address.")
+                    continue
+                    
+            except KeyboardInterrupt:
+                print("\n❌ Operation cancelled by user.")
+                sys.exit(0)
+            except Exception as e:
+                print(f"❌ Error processing email: {e}")
+                continue
+    
+    def process_jira_issues(self, jira_keys: List[str]) -> List[dict]:
+        """Process all Jira issues and generate analysis"""
+        processed_issues = []
+        
+        print(f"\n📋 Processing {len(jira_keys)} Jira issue(s)...")
+        
+        for i, key in enumerate(jira_keys, 1):
+            try:
+                print(f"   [{i}/{len(jira_keys)}] Processing {key}...")
+                
+                # Extract issue details
+                issue_data = self.jira_client.extract_issue_details(key)
+                
+                if 'error' in issue_data:
+                    print(f"   ⚠️  Warning: Could not fully process {key}: {issue_data['error']}")
+                    processed_issues.append(issue_data)
+                    continue
+                
+                print(f"   ✅ Extracted details for {key}")
+                
+                # Generate LLM summary
+                print(f"   🤖 Generating AI analysis for {key}...")
+                llm_summary = self.llm_analyzer.analyze_issue_summary(issue_data)
+                issue_data['llm_summary'] = llm_summary
+                
+                # Generate fraud & security analysis
+                print(f"   🔒 Analyzing fraud & security implications for {key}...")
+                fraud_security = self.llm_analyzer.analyze_fraud_security(issue_data)
+                issue_data['fraud_security_analysis'] = fraud_security
+                
+                processed_issues.append(issue_data)
+                print(f"   ✅ Completed analysis for {key}")
+                
+            except Exception as e:
+                logging.error(f"Error processing {key}: {e}")
+                print(f"   ❌ Error processing {key}: {e}")
+                
+                # Add error issue to maintain the list
+                error_issue = {
+                    'key': key,
+                    'summary': f"Error processing {key}",
+                    'description': f"Failed to process issue: {str(e)}",
+                    'error': str(e),
+                    'llm_summary': f"Could not analyze {key} due to processing error.",
+                    'fraud_security_analysis': "Could not perform security analysis due to processing error."
+                }
+                processed_issues.append(error_issue)
+        
+        return processed_issues
+    
+    def generate_report(self, issues_data: List[dict], jira_keys: List[str]) -> tuple:
+        """Generate Word document and HTML summary"""
+        try:
+            print("\n📄 Generating comprehensive report...")
+            
+            # Generate executive summary
+            print("   🎯 Creating executive summary...")
+            executive_summary = self.llm_analyzer.generate_executive_summary(issues_data)
+            
+            # Generate Word document
+            print("   📋 Creating Word document...")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            doc_filename = f"jira_analysis_report_{timestamp}.docx"
+            
+            document_path = self.doc_generator.create_comprehensive_report(
+                issues_data, executive_summary, doc_filename
+            )
+            
+            # Generate HTML summary for email
+            print("   📧 Creating HTML email summary...")
+            html_summary = self.doc_generator.generate_html_summary(issues_data, executive_summary)
+            
+            print(f"   ✅ Report generated successfully: {doc_filename}")
+            return document_path, html_summary
+            
+        except Exception as e:
+            logging.error(f"Error generating report: {e}")
+            raise
+    
+    def send_email_report(self, recipient_email: str, html_content: str, 
+                         document_path: str, jira_keys: List[str]) -> bool:
+        """Send the report via email"""
+        try:
+            print(f"\n📧 Sending report to {recipient_email}...")
+            
+            # Validate email configuration
+            if not self.email_sender.validate_email_config():
+                print("   ❌ Email configuration validation failed.")
+                return False
+            
+            # Send email
+            success = self.email_sender.send_report_email(
+                recipient_email, html_content, document_path, jira_keys
+            )
+            
+            if success:
+                print("   ✅ Email sent successfully!")
+                return True
+            else:
+                print("   ❌ Failed to send email.")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error sending email: {e}")
+            print(f"   ❌ Error sending email: {e}")
+            return False
+    
+    def run(self):
+        """Main execution method"""
+        try:
+            print("🚀 Starting Jira Analysis System...")
+            
+            # Initialize components
+            if not self.initialize_components():
+                print("❌ Failed to initialize system components. Please check your configuration.")
+                return False
+            
+            # Get user inputs
+            jira_keys = self.get_jira_keys_from_user()
+            recipient_email = self.get_email_from_user()
+            
+            # Process issues
+            issues_data = self.process_jira_issues(jira_keys)
+            
+            if not issues_data:
+                print("❌ No issues were successfully processed.")
+                return False
+            
+            # Generate report
+            document_path, html_summary = self.generate_report(issues_data, jira_keys)
+            
+            # Send email
+            email_success = self.send_email_report(recipient_email, html_summary, document_path, jira_keys)
+            
+            # Final summary
+            print("\n" + "="*60)
+            print("ANALYSIS COMPLETE")
+            print("="*60)
+            print(f"📊 Issues Processed: {len(issues_data)}")
+            print(f"📄 Report Generated: {document_path}")
+            print(f"📧 Email Status: {'✅ Sent' if email_success else '❌ Failed'}")
+            
+            if not email_success:
+                print(f"📁 You can find the report at: {os.path.abspath(document_path)}")
+            
+            print("\n🎉 Jira Analysis System completed successfully!")
+            return True
+            
+        except KeyboardInterrupt:
+            print("\n❌ Operation cancelled by user.")
+            return False
+        except Exception as e:
+            logging.error(f"System error: {e}")
+            print(f"❌ System error: {e}")
+            return False
 
 def main():
-    """Main execution function"""
-    
-    print("🚀 Starting Jira Security Analysis Report Generation...")
-    print("=" * 60)
-    
-    try:
-        # Validate settings
-        settings.validate()
-        print("✅ Configuration validated successfully")
-        
-        # Initialize services
-        jira_client = JiraClient()
-        ai_analyzer = AIAnalyzer()
-        doc_generator = DocumentGenerator()
-        email_service = EmailService()
-        
-        print(f"📋 Fetching {len(settings.JIRA_STORY_KEYS)} Jira stories...")
-        
-        # Fetch Jira issues
-        raw_issues = jira_client.get_issues(settings.JIRA_STORY_KEYS)
-        if not raw_issues:
-            print("❌ No Jira issues found. Please check your story keys.")
-            return False
-            
-        # Parse issue data
-        issues_data = [jira_client.parse_issue_data(issue) for issue in raw_issues]
-        print(f"✅ Successfully fetched {len(issues_data)} stories")
-        
-        # Analyze with AI
-        print("🤖 Analyzing stories for security and fraud risks...")
-        analyses = []
-        for i, issue in enumerate(issues_data, 1):
-            print(f"   Analyzing story {i}/{len(issues_data)}: {issue['key']}")
-            analysis = ai_analyzer.analyze_fraud_security_risks(issue)
-            analyses.append(analysis)
-        
-        print("✅ AI analysis completed")
-        
-        # Generate document
-        print("📄 Generating Word document...")
-        document_path = doc_generator.generate_report(issues_data, analyses)
-        print(f"✅ Document generated: {document_path}")
-        
-        # Send email
-        print("📧 Sending email report...")
-        email_sent = email_service.send_report(document_path, issues_data, analyses)
-        
-        if email_sent:
-            print(f"✅ Report successfully sent to {settings.RECIPIENT_EMAIL}")
-        else:
-            print("❌ Failed to send email report")
-            
-        # Summary
-        print("\n" + "=" * 60)
-        print("📊 REPORT SUMMARY")
-        print("=" * 60)
-        print(f"Stories Analyzed: {len(issues_data)}")
-        
-        risk_counts = {'High': 0, 'Medium': 0, 'Low': 0}
-        for analysis in analyses:
-            risk_level = analysis.get('risk_level', 'Medium')
-            risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
-        
-        for level, count in risk_counts.items():
-            if count > 0:
-                print(f"{level} Risk Stories: {count}")
-        
-        print(f"Document Location: {document_path}")
-        print(f"Email Status: {'✅ Sent' if email_sent else '❌ Failed'}")
-        print("=" * 60)
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-if __name__ == "__main__":
-    success = main()
+    """Main entry point"""
+    system = JiraAnalysisSystem()
+    success = system.run()
     sys.exit(0 if success else 1)
 
-# README.md
-# Jira Security Analysis Report Generator
+if __name__ == "__main__":
+    main()
 
-This tool automatically fetches Jira stories, analyzes them for security and fraud risks using AI, generates comprehensive Word documents, and emails the reports to stakeholders.
 
-## Features
 
-- 🔍 **Jira Integration**: Fetches stories using Basic Auth
-- 🤖 **AI Analysis**: Uses OpenAI GPT-4 for security and fraud risk assessment
-- 📄 **Document Generation**: Creates professional Word documents with detailed analysis
-- 📧 **Email Reports**: Sends beautiful HTML emails with attachments
-- 🛡️ **Security Focus**: Identifies vulnerabilities, fraud risks, and provides recommendations
-- 📊 **Risk Assessment**: Categorizes stories by risk level (High/Medium/Low)
 
-## Setup Instructions
 
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Environment Configuration
-
-Copy `.env.example` to `.env` and configure:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your credentials:
-
-```env
 # Jira Configuration
-JIRA_BASE_URL=https://your-company.atlassian.net
+JIRA_URL=https://yourcompany.atlassian.net
 JIRA_USERNAME=your-email@company.com
 JIRA_API_TOKEN=your-jira-api-token
-JIRA_STORY_KEYS=PROJ-123,PROJ-124,PROJ-125
 
 # OpenAI Configuration
 OPENAI_API_KEY=your-openai-api-key
@@ -830,171 +1118,5 @@ OPENAI_API_KEY=your-openai-api-key
 # Email Configuration
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
-SMTP_USERNAME=your-email@gmail.com
-SMTP_PASSWORD=your-app-password
-RECIPIENT_EMAIL=recipient@company.com
-SENDER_NAME=Security Analysis Bot
-```
-
-### 3. Jira API Token Setup
-
-1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
-2. Create API token
-3. Use your email as username and token as password
-
-### 4. OpenAI API Setup
-
-1. Get API key from https://platform.openai.com/api-keys
-2. Add to `.env` file
-
-### 5. Email Setup (Gmail Example)
-
-1. Enable 2-factor authentication
-2. Generate app password: https://myaccount.google.com/apppasswords
-3. Use app password in `.env`
-
-## Usage
-
-### Run the Analysis
-
-```bash
-cd jira-report-generator
-python src/main.py
-```
-
-### What It Does
-
-1. **Fetches Jira Stories**: Retrieves stories based on keys from environment
-2. **AI Analysis**: Analyzes each story for:
-   - Security vulnerabilities
-   - Fraud risks
-   - Compliance issues
-   - Recommended mitigations
-3. **Document Generation**: Creates Word document with:
-   - Executive summary
-   - Individual story analysis
-   - Risk assessments
-   - Recommendations
-4. **Email Delivery**: Sends HTML email with:
-   - Executive dashboard
-   - Risk statistics
-   - Attached detailed report
-
-## Output Examples
-
-### Generated Document Includes:
-- Executive Summary with risk distribution
-- Individual story sections with:
-  - Story details (summary, description, acceptance criteria)
-  - AI-generated security analysis
-  - Fraud risk assessment
-  - Specific recommendations
-  - Attachment information
-
-### Email Report Features:
-- Beautiful HTML layout
-- Risk level statistics
-- Story summaries with risk badges
-- Call-to-action recommendations
-- Professional formatting
-
-## AI Analysis Capabilities
-
-The AI analyzer identifies:
-
-**Security Risks:**
-- Authentication vulnerabilities
-- Data privacy concerns
-- Input validation issues
-- Authorization flaws
-- Injection attack vectors
-
-**Fraud Risks:**
-- Financial transaction security
-- Identity verification gaps
-- Audit trail weaknesses
-- User impersonation risks
-- Data manipulation scenarios
-
-**Recommendations:**
-- Specific security controls
-- Compliance requirements
-- Testing strategies
-- Monitoring solutions
-
-## Customization
-
-### Adding Custom Fields
-
-Edit `src/jira_client.py` in the `parse_issue_data` method:
-
-```python
-# Add custom field parsing
-custom_field_value = fields.get('customfield_12345', '')
-```
-
-### Modifying AI Analysis
-
-Edit `src/ai_analyzer.py` to adjust the analysis prompt or add industry-specific checks.
-
-### Email Template Customization
-
-Modify the HTML template in `src/email_service.py` to match your organization's branding.
-
-## Security Considerations
-
-- Store API tokens securely
-- Use environment variables for sensitive data
-- Regularly rotate API tokens
-- Review AI analysis results manually
-- Implement proper access controls
-
-## Troubleshooting
-
-### Common Issues:
-
-1. **Jira Authentication Failed**
-   - Verify API token is correct
-   - Check if 2FA is properly configured
-   - Ensure Jira URL is correct
-
-2. **OpenAI API Errors**
-   - Verify API key is valid
-   - Check rate limits
-   - Ensure sufficient credits
-
-3. **Email Sending Failed**
-   - Verify SMTP settings
-   - Check app password for Gmail
-   - Ensure less secure apps are enabled (if needed)
-
-4. **Missing Story Keys**
-   - Verify story keys exist and are accessible
-   - Check permissions for the Jira user
-
-### Debug Mode
-
-Add debug logging by modifying the script:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-## Advanced Features
-
-### Batch Processing
-The tool can handle multiple stories efficiently with progress tracking.
-
-### Attachment Analysis
-Automatically includes attachment information in the analysis.
-
-### Risk Scoring
-Provides quantitative risk assessment for prioritization.
-
-### Compliance Mapping
-Maps identified risks to compliance frameworks (GDPR, PCI-DSS, etc.).
-
-## License
-
-This project is provided as-is for educational and professional use. Please ensure compliance with your organization's security policies and API usage guidelines.
+SENDER_EMAIL=your-email@gmail.com
+SENDER_PASSWORD=your-app-password
