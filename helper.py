@@ -1,8 +1,767 @@
 """
+Document Generator for creating Word documents with clean text formatting
+"""
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.shared import OxmlElement, qn
+import logging
+import re
+from typing import List, Dict
+from datetime import datetime
+
+class DocumentGenerator:
+    def __init__(self):
+        self.doc = Document()
+        self._setup_document_styles()
+    
+    def _clean_text_content(self, text: str) -> str:
+        """
+        Clean text content by removing excessive whitespace and formatting issues
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        
+        # Remove HTML entities
+        text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Replace multiple newlines with double newline
+        text = re.sub(r'^\s+|\s+
+    
+    def create_comprehensive_report(self, issues_data: List[Dict], 
+                                  executive_summary: str, 
+                                  output_filename: str = "jira_analysis_report.docx") -> str:
+        """
+        Create a comprehensive analysis report
+        """
+        try:
+            # Document Header
+            self._add_document_header()
+            
+            # Executive Summary
+            self._add_executive_summary(executive_summary)
+            
+            # Individual Issue Analysis
+            self._add_issues_analysis(issues_data)
+            
+            # Consolidated Fraud & Security Analysis
+            self._add_consolidated_security_analysis(issues_data)
+            
+            # Appendix
+            self._add_appendix(issues_data)
+            
+            # Save document
+            self.doc.save(output_filename)
+            logging.info(f"Document saved as {output_filename}")
+            return output_filename
+            
+        except Exception as e:
+            logging.error(f"Error creating document: {e}")
+            raise
+    
+    def _add_document_header(self):
+        """Add document header and title"""
+        # Title
+        title = self.doc.add_heading('Jira Issues Analysis Report', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Subtitle
+        subtitle = self.doc.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = subtitle.add_run('Comprehensive Analysis with Fraud & Security Assessment')
+        run.italic = True
+        run.font.size = Pt(12)
+        
+        # Date and metadata
+        meta_para = self.doc.add_paragraph()
+        meta_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta_para.add_run(f'Generated on: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}')
+        
+        # Add page break
+        self.doc.add_page_break()
+    
+    def _add_executive_summary(self, executive_summary: str):
+        """Add executive summary section"""
+        self.doc.add_heading('Executive Summary', level=1)
+        
+        self._add_clean_paragraph(executive_summary)
+        
+        self.doc.add_page_break()
+    
+    def _add_issues_analysis(self, issues_data: List[Dict]):
+        """Add detailed analysis for each issue"""
+        self.doc.add_heading('Detailed Issue Analysis', level=1)
+        
+        for i, issue in enumerate(issues_data, 1):
+            # Issue header
+            clean_summary = self._clean_text_content(issue.get('summary', ''))
+            issue_heading = self.doc.add_heading(f"{i}. {issue['key']}: {clean_summary}", level=2)
+            
+            # Basic Information Table
+            self._add_issue_info_table(issue)
+            
+            # LLM Analysis
+            if 'llm_summary' in issue and issue['llm_summary']:
+                self.doc.add_heading('Analysis Summary', level=3)
+                self._add_clean_paragraph(issue['llm_summary'])
+            
+            # Fraud & Security Analysis
+            if 'fraud_security_analysis' in issue and issue['fraud_security_analysis']:
+                self.doc.add_heading('Fraud & Security Assessment', level=3)
+                self._add_clean_paragraph(issue['fraud_security_analysis'])
+            
+            # Attachments
+            if issue.get('attachments'):
+                self.doc.add_heading('Attachments', level=3)
+                for att in issue['attachments']:
+                    att_para = self.doc.add_paragraph()
+                    att_para.add_run(f"• {att['filename']} ").bold = True
+                    att_para.add_run(f"(Size: {att['size']} bytes, Created: {att['created']})")
+                    if att.get('content_summary'):
+                        clean_content = self._clean_text_content(att['content_summary'])
+                        if clean_content:
+                            self._add_clean_paragraph(f"   Content: {clean_content}")
+            
+            # Add separator
+            if i < len(issues_data):
+                self.doc.add_paragraph("_" * 80)
+                self.doc.add_paragraph()
+    
+    def _add_issue_info_table(self, issue: Dict):
+        """Add issue information table with cleaned content"""
+        table = self.doc.add_table(rows=0, cols=2)
+        table.style = 'Table Grid'
+        
+        info_items = [
+            ('Issue Key', issue['key']),
+            ('Status', self._clean_text_content(str(issue.get('status', 'Unknown')))),
+            ('Priority', self._clean_text_content(str(issue.get('priority', 'Not Set')))),
+            ('Type', self._clean_text_content(str(issue.get('issue_type', 'Unknown')))),
+            ('Assignee', self._clean_text_content(str(issue.get('assignee', 'Unassigned')))),
+            ('Reporter', self._clean_text_content(str(issue.get('reporter', 'Unknown')))),
+            ('Created', self._clean_text_content(str(issue.get('created', 'Unknown')))),
+            ('Updated', self._clean_text_content(str(issue.get('updated', 'Unknown'))))
+        ]
+        
+        for label, value in info_items:
+            row = table.add_row()
+            row.cells[0].text = label
+            row.cells[0].paragraphs[0].runs[0].bold = True
+            row.cells[1].text = value
+        
+        self.doc.add_paragraph()
+        
+        # Description
+        if issue.get('description'):
+            self.doc.add_heading('Description', level=3)
+            self._add_clean_paragraph(issue['description'])
+        
+        # Acceptance Criteria
+        if issue.get('acceptance_criteria') and issue['acceptance_criteria'] != "No acceptance criteria found":
+            self.doc.add_heading('Acceptance Criteria', level=3)
+            self._add_clean_paragraph(issue['acceptance_criteria'])
+    
+    def _add_consolidated_security_analysis(self, issues_data: List[Dict]):
+        """Add consolidated fraud and security analysis"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Consolidated Fraud & Security Analysis', level=1)
+        
+        # Summary of all security concerns
+        high_risk_issues = []
+        medium_risk_issues = []
+        low_risk_issues = []
+        
+        for issue in issues_data:
+            fraud_analysis = issue.get('fraud_security_analysis', '')
+            if 'high' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                high_risk_issues.append(issue['key'])
+            elif 'medium' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                medium_risk_issues.append(issue['key'])
+            else:
+                low_risk_issues.append(issue['key'])
+        
+        # Risk Summary
+        self.doc.add_heading('Risk Level Summary', level=2)
+        
+        if high_risk_issues:
+            self.doc.add_paragraph().add_run('High Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(high_risk_issues))
+        
+        if medium_risk_issues:
+            self.doc.add_paragraph().add_run('Medium Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(medium_risk_issues))
+        
+        if low_risk_issues:
+            self.doc.add_paragraph().add_run('Low Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(low_risk_issues))
+        
+        # Detailed Security Recommendations
+        self.doc.add_heading('Security Recommendations', level=2)
+        
+        recommendations = [
+            "Implement comprehensive input validation and sanitization",
+            "Ensure proper authentication and authorization controls",
+            "Regular security testing and vulnerability assessments",
+            "Implement fraud detection and monitoring systems",
+            "Ensure compliance with relevant data protection regulations",
+            "Establish incident response procedures",
+            "Regular security awareness training for development team"
+        ]
+        
+        for rec in recommendations:
+            para = self.doc.add_paragraph()
+            para.add_run('• ').bold = True
+            para.add_run(rec)
+    
+    def _add_appendix(self, issues_data: List[Dict]):
+        """Add appendix with additional information"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Appendix', level=1)
+        
+        # Issue Summary Table
+        self.doc.add_heading('Issues Summary Table', level=2)
+        
+        table = self.doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        
+        # Header row
+        header_cells = table.rows[0].cells
+        header_cells[0].text = 'Issue Key'
+        header_cells[1].text = 'Summary'
+        header_cells[2].text = 'Status'
+        header_cells[3].text = 'Priority'
+        
+        for cell in header_cells:
+            cell.paragraphs[0].runs[0].bold = True
+        
+        # Data rows
+        for issue in issues_data:
+            row = table.add_row()
+            row.cells[0].text = issue['key']
+            
+            # Clean and truncate summary
+            clean_summary = self._clean_text_content(issue['summary'])
+            row.cells[1].text = clean_summary[:50] + '...' if len(clean_summary) > 50 else clean_summary
+            
+            row.cells[2].text = self._clean_text_content(str(issue.get('status', 'Unknown')))
+            row.cells[3].text = self._clean_text_content(str(issue.get('priority', 'Not Set')))
+        
+        # Generation info
+        self.doc.add_paragraph()
+        self.doc.add_heading('Document Information', level=2)
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Total Issues Analyzed: ').bold = True
+        info_para.add_run(str(len(issues_data)))
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Generated by: ').bold = True
+        info_para.add_run('Jira Analysis System')
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Analysis Date: ').bold = True
+        info_para.add_run(datetime.now().strftime("%B %d, %Y"))
+    
+    def generate_html_summary(self, issues_data: List[Dict], executive_summary: str) -> str:
+        """Generate HTML summary for email"""
+        html_content = f"""
+        <html>
+        <head>
+            <title>Jira Analysis Report Summary</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background-color: #f4f4f4; padding: 15px; border-radius: 5px; }}
+                .summary {{ background-color: #e8f4f8; padding: 15px; margin: 15px 0; border-radius: 5px; }}
+                .issue {{ border-left: 4px solid #007cba; padding-left: 15px; margin: 10px 0; }}
+                .high-risk {{ border-left-color: #d32f2f; }}
+                .medium-risk {{ border-left-color: #f57c00; }}
+                .low-risk {{ border-left-color: #388e3c; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>Jira Issues Analysis Report</h1>
+                <p><strong>Generated:</strong> {datetime.now().strftime("%B %d, %Y at %I:%M %p")}</p>
+                <p><strong>Total Issues Analyzed:</strong> {len(issues_data)}</p>
+            </div>
+            
+            <div class="summary">
+                <h2>Executive Summary</h2>
+                <p>{executive_summary.replace(chr(10), '<br>')}</p>
+            </div>
+            
+            <h2>Issues Overview</h2>
+            <table>
+                <tr>
+                    <th>Issue Key</th>
+                    <th>Summary</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Risk Level</th>
+                </tr>
+        """
+        
+        for issue in issues_data:
+            risk_level = "Low"
+            risk_class = "low-risk"
+            
+            fraud_analysis = issue.get('fraud_security_analysis', '').lower()
+            if 'high' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "High"
+                risk_class = "high-risk"
+            elif 'medium' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "Medium"
+                risk_class = "medium-risk"
+            
+            html_content += f"""
+                <tr class="{risk_class}">
+                    <td>{issue['key']}</td>
+                    <td>{self._clean_text_content(issue['summary'])[:60] + '...' if len(self._clean_text_content(issue['summary'])) > 60 else self._clean_text_content(issue['summary'])}</td>
+                    <td>{self._clean_text_content(str(issue.get('status', 'Unknown')))}</td>
+                    <td>{self._clean_text_content(str(issue.get('priority', 'Not Set')))}</td>
+                    <td>{risk_level}</td>
+                </tr>
+            """
+        
+        html_content += """
+            </table>
+            
+            <div class="summary">
+                <h3>Key Recommendations</h3>
+                <ul>
+                    <li>Review high-risk issues immediately</li>
+                    <li>Implement recommended security controls</li>
+                    <li>Conduct regular security assessments</li>
+                    <li>Ensure compliance with data protection requirements</li>
+                </ul>
+            </div>
+            
+            <p><em>Please find the detailed analysis report attached to this email.</em></p>
+        </body>
+        </html>
+        """
+        
+        return html_content, '', text, flags=re.MULTILINE)  # Remove leading/trailing spaces from each line
+        
+        # Remove empty lines at the beginning and end
+        text = text.strip()
+        
+        # Normalize line breaks
+        text = re.sub(r'\r\n', '\n', text)  # Convert Windows line breaks
+        text = re.sub(r'\r', '\n', text)  # Convert Mac line breaks
+        
+        # Remove more than 2 consecutive newlines
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Clean up bullet points and list formatting
+        text = re.sub(r'^\s*[-*•]\s*', '• ', text, flags=re.MULTILINE)
+        
+        # Remove trailing periods from headers/titles (common in Jira)
+        lines = text.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
+    
+    def _format_multiline_text(self, text: str) -> List[str]:
+        """
+        Format multiline text into properly structured paragraphs
+        """
+        if not text:
+            return [""]
+        
+        cleaned_text = self._clean_text_content(text)
+        
+        # Split into paragraphs (separated by double newlines or more)
+        paragraphs = re.split(r'\n\s*\n', cleaned_text)
+        
+        formatted_paragraphs = []
+        for para in paragraphs:
+            para = para.strip()
+            if para:
+                # Handle bullet points
+                if para.startswith('•') or para.startswith('-') or para.startswith('*'):
+                    # Keep bullet points as separate items
+                    bullet_items = re.split(r'\n(?=[•\-*])', para)
+                    for item in bullet_items:
+                        item = item.strip()
+                        if item:
+                            formatted_paragraphs.append(item)
+                else:
+                    # Regular paragraph
+                    formatted_paragraphs.append(para)
+        
+        return formatted_paragraphs if formatted_paragraphs else [""]
+    
+    def _add_clean_paragraph(self, text: str, style=None):
+        """
+        Add a paragraph with cleaned text content
+        """
+        if not text:
+            return
+        
+        cleaned_text = self._clean_text_content(text)
+        if not cleaned_text:
+            return
+        
+        # Handle multiline content
+        paragraphs = self._format_multiline_text(cleaned_text)
+        
+        for para_text in paragraphs:
+            if para_text.strip():
+                para = self.doc.add_paragraph(para_text, style=style)
+                para.space_after = Pt(6)
+    
+    def _setup_document_styles(self):
+        """Setup document styles and formatting"""
+        # Add title style
+        styles = self.doc.styles
+        
+        # Create or modify heading styles
+        try:
+            heading1 = styles['Heading 1']
+            heading1.font.size = Pt(16)
+            heading1.font.bold = True
+        except:
+            pass
+        
+        try:
+            heading2 = styles['Heading 2']
+            heading2.font.size = Pt(14)
+            heading2.font.bold = True
+        except:
+            pass
+    
+    def create_comprehensive_report(self, issues_data: List[Dict], 
+                                  executive_summary: str, 
+                                  output_filename: str = "jira_analysis_report.docx") -> str:
+        """
+        Create a comprehensive analysis report
+        """
+        try:
+            # Document Header
+            self._add_document_header()
+            
+            # Executive Summary
+            self._add_executive_summary(executive_summary)
+            
+            # Individual Issue Analysis
+            self._add_issues_analysis(issues_data)
+            
+            # Consolidated Fraud & Security Analysis
+            self._add_consolidated_security_analysis(issues_data)
+            
+            # Appendix
+            self._add_appendix(issues_data)
+            
+            # Save document
+            self.doc.save(output_filename)
+            logging.info(f"Document saved as {output_filename}")
+            return output_filename
+            
+        except Exception as e:
+            logging.error(f"Error creating document: {e}")
+            raise
+    
+    def _add_document_header(self):
+        """Add document header and title"""
+        # Title
+        title = self.doc.add_heading('Jira Issues Analysis Report', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Subtitle
+        subtitle = self.doc.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = subtitle.add_run('Comprehensive Analysis with Fraud & Security Assessment')
+        run.italic = True
+        run.font.size = Pt(12)
+        
+        # Date and metadata
+        meta_para = self.doc.add_paragraph()
+        meta_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta_para.add_run(f'Generated on: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}')
+        
+        # Add page break
+        self.doc.add_page_break()
+    
+    def _add_executive_summary(self, executive_summary: str):
+        """Add executive summary section"""
+        self.doc.add_heading('Executive Summary', level=1)
+        
+        para = self.doc.add_paragraph(executive_summary)
+        para.space_after = Pt(12)
+        
+        self.doc.add_page_break()
+    
+    def _add_issues_analysis(self, issues_data: List[Dict]):
+        """Add detailed analysis for each issue"""
+        self.doc.add_heading('Detailed Issue Analysis', level=1)
+        
+        for i, issue in enumerate(issues_data, 1):
+            # Issue header
+            issue_heading = self.doc.add_heading(f"{i}. {issue['key']}: {issue['summary']}", level=2)
+            
+            # Basic Information Table
+            self._add_issue_info_table(issue)
+            
+            # LLM Analysis
+            if 'llm_summary' in issue:
+                self.doc.add_heading('Analysis Summary', level=3)
+                self.doc.add_paragraph(issue['llm_summary'])
+            
+            # Fraud & Security Analysis
+            if 'fraud_security_analysis' in issue:
+                self.doc.add_heading('Fraud & Security Assessment', level=3)
+                self.doc.add_paragraph(issue['fraud_security_analysis'])
+            
+            # Attachments
+            if issue.get('attachments'):
+                self.doc.add_heading('Attachments', level=3)
+                for att in issue['attachments']:
+                    att_para = self.doc.add_paragraph()
+                    att_para.add_run(f"• {att['filename']} ").bold = True
+                    att_para.add_run(f"(Size: {att['size']} bytes, Created: {att['created']})")
+                    if att.get('content_summary'):
+                        self.doc.add_paragraph(f"   Content: {att['content_summary']}")
+            
+            # Add separator
+            if i < len(issues_data):
+                self.doc.add_paragraph("_" * 80)
+                self.doc.add_paragraph()
+    
+    def _add_issue_info_table(self, issue: Dict):
+        """Add issue information table"""
+        table = self.doc.add_table(rows=0, cols=2)
+        table.style = 'Table Grid'
+        
+        info_items = [
+            ('Issue Key', issue['key']),
+            ('Status', issue.get('status', 'Unknown')),
+            ('Priority', issue.get('priority', 'Not Set')),
+            ('Type', issue.get('issue_type', 'Unknown')),
+            ('Assignee', issue.get('assignee', 'Unassigned')),
+            ('Reporter', issue.get('reporter', 'Unknown')),
+            ('Created', issue.get('created', 'Unknown')),
+            ('Updated', issue.get('updated', 'Unknown'))
+        ]
+        
+        for label, value in info_items:
+            row = table.add_row()
+            row.cells[0].text = label
+            row.cells[0].paragraphs[0].runs[0].bold = True
+            row.cells[1].text = str(value)
+        
+        self.doc.add_paragraph()
+        
+        # Description
+        if issue.get('description'):
+            self.doc.add_heading('Description', level=3)
+            self.doc.add_paragraph(issue['description'])
+        
+        # Acceptance Criteria
+        if issue.get('acceptance_criteria') and issue['acceptance_criteria'] != "No acceptance criteria found":
+            self.doc.add_heading('Acceptance Criteria', level=3)
+            self.doc.add_paragraph(issue['acceptance_criteria'])
+    
+    def _add_consolidated_security_analysis(self, issues_data: List[Dict]):
+        """Add consolidated fraud and security analysis"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Consolidated Fraud & Security Analysis', level=1)
+        
+        # Summary of all security concerns
+        high_risk_issues = []
+        medium_risk_issues = []
+        low_risk_issues = []
+        
+        for issue in issues_data:
+            fraud_analysis = issue.get('fraud_security_analysis', '')
+            if 'high' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                high_risk_issues.append(issue['key'])
+            elif 'medium' in fraud_analysis.lower() and 'risk' in fraud_analysis.lower():
+                medium_risk_issues.append(issue['key'])
+            else:
+                low_risk_issues.append(issue['key'])
+        
+        # Risk Summary
+        self.doc.add_heading('Risk Level Summary', level=2)
+        
+        if high_risk_issues:
+            self.doc.add_paragraph().add_run('High Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(high_risk_issues))
+        
+        if medium_risk_issues:
+            self.doc.add_paragraph().add_run('Medium Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(medium_risk_issues))
+        
+        if low_risk_issues:
+            self.doc.add_paragraph().add_run('Low Risk Issues: ').bold = True
+            self.doc.add_paragraph(', '.join(low_risk_issues))
+        
+        # Detailed Security Recommendations
+        self.doc.add_heading('Security Recommendations', level=2)
+        
+        recommendations = [
+            "Implement comprehensive input validation and sanitization",
+            "Ensure proper authentication and authorization controls",
+            "Regular security testing and vulnerability assessments",
+            "Implement fraud detection and monitoring systems",
+            "Ensure compliance with relevant data protection regulations",
+            "Establish incident response procedures",
+            "Regular security awareness training for development team"
+        ]
+        
+        for rec in recommendations:
+            para = self.doc.add_paragraph()
+            para.add_run('• ').bold = True
+            para.add_run(rec)
+    
+    def _add_appendix(self, issues_data: List[Dict]):
+        """Add appendix with additional information"""
+        self.doc.add_page_break()
+        self.doc.add_heading('Appendix', level=1)
+        
+        # Issue Summary Table
+        self.doc.add_heading('Issues Summary Table', level=2)
+        
+        table = self.doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        
+        # Header row
+        header_cells = table.rows[0].cells
+        header_cells[0].text = 'Issue Key'
+        header_cells[1].text = 'Summary'
+        header_cells[2].text = 'Status'
+        header_cells[3].text = 'Priority'
+        
+        for cell in header_cells:
+            cell.paragraphs[0].runs[0].bold = True
+        
+        # Data rows
+        for issue in issues_data:
+            row = table.add_row()
+            row.cells[0].text = issue['key']
+            row.cells[1].text = issue['summary'][:50] + '...' if len(issue['summary']) > 50 else issue['summary']
+            row.cells[2].text = issue.get('status', 'Unknown')
+            row.cells[3].text = issue.get('priority', 'Not Set')
+        
+        # Generation info
+        self.doc.add_paragraph()
+        self.doc.add_heading('Document Information', level=2)
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Total Issues Analyzed: ').bold = True
+        info_para.add_run(str(len(issues_data)))
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Generated by: ').bold = True
+        info_para.add_run('Jira Analysis System')
+        
+        info_para = self.doc.add_paragraph()
+        info_para.add_run('Analysis Date: ').bold = True
+        info_para.add_run(datetime.now().strftime("%B %d, %Y"))
+    
+    def generate_html_summary(self, issues_data: List[Dict], executive_summary: str) -> str:
+        """Generate HTML summary for email"""
+        html_content = f"""
+        <html>
+        <head>
+            <title>Jira Analysis Report Summary</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background-color: #f4f4f4; padding: 15px; border-radius: 5px; }}
+                .summary {{ background-color: #e8f4f8; padding: 15px; margin: 15px 0; border-radius: 5px; }}
+                .issue {{ border-left: 4px solid #007cba; padding-left: 15px; margin: 10px 0; }}
+                .high-risk {{ border-left-color: #d32f2f; }}
+                .medium-risk {{ border-left-color: #f57c00; }}
+                .low-risk {{ border-left-color: #388e3c; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>Jira Issues Analysis Report</h1>
+                <p><strong>Generated:</strong> {datetime.now().strftime("%B %d, %Y at %I:%M %p")}</p>
+                <p><strong>Total Issues Analyzed:</strong> {len(issues_data)}</p>
+            </div>
+            
+            <div class="summary">
+                <h2>Executive Summary</h2>
+                <p>{executive_summary.replace(chr(10), '<br>')}</p>
+            </div>
+            
+            <h2>Issues Overview</h2>
+            <table>
+                <tr>
+                    <th>Issue Key</th>
+                    <th>Summary</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Risk Level</th>
+                </tr>
+        """
+        
+        for issue in issues_data:
+            risk_level = "Low"
+            risk_class = "low-risk"
+            
+            fraud_analysis = issue.get('fraud_security_analysis', '').lower()
+            if 'high' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "High"
+                risk_class = "high-risk"
+            elif 'medium' in fraud_analysis and 'risk' in fraud_analysis:
+                risk_level = "Medium"
+                risk_class = "medium-risk"
+            
+            html_content += f"""
+                <tr class="{risk_class}">
+                    <td>{issue['key']}</td>
+                    <td>{issue['summary'][:60] + '...' if len(issue['summary']) > 60 else issue['summary']}</td>
+                    <td>{issue.get('status', 'Unknown')}</td>
+                    <td>{issue.get('priority', 'Not Set')}</td>
+                    <td>{risk_level}</td>
+                </tr>
+            """
+        
+        html_content += """
+            </table>
+            
+            <div class="summary">
+                <h3>Key Recommendations</h3>
+                <ul>
+                    <li>Review high-risk issues immediately</li>
+                    <li>Implement recommended security controls</li>
+                    <li>Conduct regular security assessments</li>
+                    <li>Ensure compliance with data protection requirements</li>
+                </ul>
+            </div>
+            
+            <p><em>Please find the detailed analysis report attached to this email.</em></p>
+        </body>
+        </html>
+        """
+        
+        return html_content
+
+
+
+
+
+
+
+"""
 Jira Client for extracting issue details using Bearer Token authentication
 """
 import requests
 import json
+import re
 from bs4 import BeautifulSoup
 import logging
 from typing import Dict, List, Optional
@@ -109,20 +868,496 @@ class JiraClient:
         }
     
     def _clean_html(self, text) -> str:
-        """Clean HTML content from Jira fields"""
+        """Clean HTML content from Jira fields and remove excessive whitespace"""
         if not text:
             return ""
         
         try:
             # Handle Atlassian Document Format (ADF)
             if isinstance(text, dict):
-                return self._extract_text_from_adf(text)
+                cleaned_text = self._extract_text_from_adf(text)
             elif isinstance(text, list):
-                return '\n'.join([self._extract_text_from_adf(item) if isinstance(item, dict) else str(item) for item in text])
+                cleaned_text = '\n'.join([self._extract_text_from_adf(item) if isinstance(item, dict) else str(item) for item in text])
             else:
                 # Handle HTML content
                 soup = BeautifulSoup(str(text), 'html.parser')
-                return soup.get_text(strip=True)
+                cleaned_text = soup.get_text(strip=True)
+            
+            # Additional cleaning for better formatting
+            if cleaned_text:
+                # Remove excessive whitespace
+                cleaned_text = re.sub(r'\s+', ' ', cleaned_text)  # Multiple spaces to single space
+                cleaned_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned_text)  # Multiple newlines to double newline
+                cleaned_text = re.sub(r'^\s+|\s+
+    
+    def _extract_text_from_adf(self, adf_content: dict) -> str:
+        """Extract text from Atlassian Document Format with better formatting"""
+        try:
+            if not isinstance(adf_content, dict):
+                return str(adf_content)
+            
+            text_parts = []
+            
+            def extract_text_recursive(node, depth=0):
+                if isinstance(node, dict):
+                    node_type = node.get('type', '')
+                    
+                    if node_type == 'text':
+                        text_parts.append(node.get('text', ''))
+                    elif node_type == 'hardBreak':
+                        text_parts.append('\n')
+                    elif node_type == 'paragraph':
+                        if text_parts and not text_parts[-1].endswith('\n'):
+                            text_parts.append('\n')
+                        if 'content' in node:
+                            for child in node['content']:
+                                extract_text_recursive(child, depth + 1)
+                        text_parts.append('\n')
+                    elif node_type in ['bulletList', 'orderedList']:
+                        text_parts.append('\n')
+                        if 'content' in node:
+                            for child in node['content']:
+                                extract_text_recursive(child, depth + 1)
+                        text_parts.append('\n')
+                    elif node_type == 'listItem':
+                        text_parts.append('• ')
+                        if 'content' in node:
+                            for child in node['content']:
+                                extract_text_recursive(child, depth + 1)
+                        text_parts.append('\n')
+                    elif 'content' in node:
+                        for child in node['content']:
+                            extract_text_recursive(child, depth + 1)
+                elif isinstance(node, list):
+                    for item in node:
+                        extract_text_recursive(item, depth)
+            
+            extract_text_recursive(adf_content)
+            
+            # Join and clean up the text
+            result = ''.join(text_parts)
+            
+            # Clean up excessive newlines and spaces
+            result = re.sub(r'\n\s*\n\s*\n+', '\n\n', result)
+            result = re.sub(r'^\s+|\s+
+    
+    def _extract_acceptance_criteria(self, fields: dict, description: str) -> str:
+        """
+        Extract acceptance criteria from various possible fields
+        """
+        acceptance_criteria = ""
+        
+        try:
+            # Check common custom fields for acceptance criteria
+            custom_field_patterns = [
+                'customfield_10100', 'customfield_10200', 'customfield_10300',
+                'customfield_10400', 'customfield_10500', 'customfield_11000',
+                'customfield_12000', 'customfield_13000'
+            ]
+            
+            for field_name in custom_field_patterns:
+                if field_name in fields and fields[field_name]:
+                    field_value = fields[field_name]
+                    
+                    # Handle different field types
+                    if isinstance(field_value, dict):
+                        field_text = self._extract_text_from_adf(field_value)
+                    elif isinstance(field_value, str):
+                        field_text = self._clean_html(field_value)
+                    else:
+                        field_text = str(field_value)
+                    
+                    # Check if this field contains acceptance criteria
+                    if field_text and any(keyword in field_text.lower() for keyword in ['acceptance', 'criteria', 'ac:', 'given', 'when', 'then']):
+                        acceptance_criteria = field_text
+                        break
+            
+            # If not found in custom fields, look in description
+            if not acceptance_criteria and description:
+                lines = description.split('\n')
+                
+                capture = False
+                ac_lines = []
+                
+                for line in lines:
+                    line_clean = line.strip()
+                    line_lower = line_clean.lower()
+                    
+                    # Look for acceptance criteria headers
+                    if any(keyword in line_lower for keyword in ['acceptance criteria', 'acceptance', 'ac:', 'given when then']):
+                        capture = True
+                        if ':' in line_clean:
+                            ac_part = line_clean.split(':', 1)[1].strip()
+                            if ac_part:
+                                ac_lines.append(ac_part)
+                        continue
+                    
+                    if capture:
+                        if line_clean and not any(stop_word in line_lower for stop_word in ['description', 'summary', 'notes', 'background']):
+                            ac_lines.append(line_clean)
+                        elif not line_clean and ac_lines:
+                            # Empty line might indicate end of AC section
+                            break
+                
+                if ac_lines:
+                    acceptance_criteria = '\n'.join(ac_lines)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting acceptance criteria: {e}")
+        
+        return acceptance_criteria or "No acceptance criteria found"
+    
+    def _extract_attachments(self, attachments: List[dict]) -> List[Dict]:
+        """
+        Extract attachment information and content
+        """
+        attachments_info = []
+        
+        try:
+            for attachment in attachments:
+                att_info = {
+                    'filename': attachment.get('filename', 'Unknown'),
+                    'size': attachment.get('size', 0),
+                    'created': attachment.get('created', 'Unknown'),
+                    'author': attachment.get('author', {}).get('displayName', 'Unknown'),
+                    'content_summary': "",
+                    'mime_type': attachment.get('mimeType', 'Unknown')
+                }
+                
+                # Try to read attachment content if it's a text file and small enough
+                content_url = attachment.get('content')
+                if content_url and att_info['size'] < 50000:  # Only for files smaller than 50KB
+                    try:
+                        if any(file_type in att_info['mime_type'].lower() for file_type in ['text', 'json', 'xml']):
+                            response = self.session.get(content_url)
+                            if response.status_code == 200:
+                                content = response.text
+                                att_info['content_summary'] = content[:500] + "..." if len(content) > 500 else content
+                    except Exception as e:
+                        att_info['content_summary'] = f"Could not read file content: {e}"
+                
+                attachments_info.append(att_info)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting attachments: {e}")
+        
+        return attachments_info
+    
+    def validate_connection(self) -> bool:
+        """Validate Jira connection"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/myself')
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logging.error(f"Jira connection validation failed: {e}")
+            return False
+    
+    def get_issue_exists(self, issue_key: str) -> bool:
+        """Check if an issue exists"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/issue/{issue_key}')
+            return response.status_code == 200
+        except:
+            return False, '', cleaned_text, flags=re.MULTILINE)  # Leading/trailing spaces per line
+                cleaned_text = cleaned_text.strip()
+                
+                # Normalize line breaks
+                cleaned_text = re.sub(r'\r\n', '\n', cleaned_text)
+                cleaned_text = re.sub(r'\r', '\n', cleaned_text)
+                
+                # Remove HTML entities
+                cleaned_text = cleaned_text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            
+            return cleaned_text
+            
+        except Exception as e:
+            logging.warning(f"Error cleaning HTML content: {e}")
+            return str(text) if text else ""
+    
+    def _extract_text_from_adf(self, adf_content: dict) -> str:
+        """Extract text from Atlassian Document Format"""
+        try:
+            if not isinstance(adf_content, dict):
+                return str(adf_content)
+            
+            text_parts = []
+            
+            def extract_text_recursive(node):
+                if isinstance(node, dict):
+                    if node.get('type') == 'text':
+                        text_parts.append(node.get('text', ''))
+                    elif 'content' in node:
+                        for child in node['content']:
+                            extract_text_recursive(child)
+                elif isinstance(node, list):
+                    for item in node:
+                        extract_text_recursive(item)
+            
+            extract_text_recursive(adf_content)
+            return ' '.join(text_parts).strip()
+            
+        except Exception as e:
+            logging.warning(f"Error extracting text from ADF: {e}")
+            return str(adf_content)
+    
+    def _extract_acceptance_criteria(self, fields: dict, description: str) -> str:
+        """
+        Extract acceptance criteria from various possible fields
+        """
+        acceptance_criteria = ""
+        
+        try:
+            # Check common custom fields for acceptance criteria
+            custom_field_patterns = [
+                'customfield_10100', 'customfield_10200', 'customfield_10300',
+                'customfield_10400', 'customfield_10500', 'customfield_11000',
+                'customfield_12000', 'customfield_13000'
+            ]
+            
+            for field_name in custom_field_patterns:
+                if field_name in fields and fields[field_name]:
+                    field_value = fields[field_name]
+                    
+                    # Handle different field types
+                    if isinstance(field_value, dict):
+                        field_text = self._extract_text_from_adf(field_value)
+                    elif isinstance(field_value, str):
+                        field_text = self._clean_html(field_value)
+                    else:
+                        field_text = str(field_value)
+                    
+                    # Check if this field contains acceptance criteria
+                    if field_text and any(keyword in field_text.lower() for keyword in ['acceptance', 'criteria', 'ac:', 'given', 'when', 'then']):
+                        acceptance_criteria = field_text
+                        break
+            
+            # If not found in custom fields, look in description
+            if not acceptance_criteria and description:
+                lines = description.split('\n')
+                
+                capture = False
+                ac_lines = []
+                
+                for line in lines:
+                    line_clean = line.strip()
+                    line_lower = line_clean.lower()
+                    
+                    # Look for acceptance criteria headers
+                    if any(keyword in line_lower for keyword in ['acceptance criteria', 'acceptance', 'ac:', 'given when then']):
+                        capture = True
+                        if ':' in line_clean:
+                            ac_part = line_clean.split(':', 1)[1].strip()
+                            if ac_part:
+                                ac_lines.append(ac_part)
+                        continue
+                    
+                    if capture:
+                        if line_clean and not any(stop_word in line_lower for stop_word in ['description', 'summary', 'notes', 'background']):
+                            ac_lines.append(line_clean)
+                        elif not line_clean and ac_lines:
+                            # Empty line might indicate end of AC section
+                            break
+                
+                if ac_lines:
+                    acceptance_criteria = '\n'.join(ac_lines)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting acceptance criteria: {e}")
+        
+        return acceptance_criteria or "No acceptance criteria found"
+    
+    def _extract_attachments(self, attachments: List[dict]) -> List[Dict]:
+        """
+        Extract attachment information and content
+        """
+        attachments_info = []
+        
+        try:
+            for attachment in attachments:
+                att_info = {
+                    'filename': attachment.get('filename', 'Unknown'),
+                    'size': attachment.get('size', 0),
+                    'created': attachment.get('created', 'Unknown'),
+                    'author': attachment.get('author', {}).get('displayName', 'Unknown'),
+                    'content_summary': "",
+                    'mime_type': attachment.get('mimeType', 'Unknown')
+                }
+                
+                # Try to read attachment content if it's a text file and small enough
+                content_url = attachment.get('content')
+                if content_url and att_info['size'] < 50000:  # Only for files smaller than 50KB
+                    try:
+                        if any(file_type in att_info['mime_type'].lower() for file_type in ['text', 'json', 'xml']):
+                            response = self.session.get(content_url)
+                            if response.status_code == 200:
+                                content = response.text
+                                att_info['content_summary'] = content[:500] + "..." if len(content) > 500 else content
+                    except Exception as e:
+                        att_info['content_summary'] = f"Could not read file content: {e}"
+                
+                attachments_info.append(att_info)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting attachments: {e}")
+        
+        return attachments_info
+    
+    def validate_connection(self) -> bool:
+        """Validate Jira connection"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/myself')
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logging.error(f"Jira connection validation failed: {e}")
+            return False
+    
+    def get_issue_exists(self, issue_key: str) -> bool:
+        """Check if an issue exists"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/issue/{issue_key}')
+            return response.status_code == 200
+        except:
+            return False, '', result, flags=re.MULTILINE)
+            result = result.strip()
+            
+            return result
+            
+        except Exception as e:
+            logging.warning(f"Error extracting text from ADF: {e}")
+            return str(adf_content)
+    
+    def _extract_acceptance_criteria(self, fields: dict, description: str) -> str:
+        """
+        Extract acceptance criteria from various possible fields
+        """
+        acceptance_criteria = ""
+        
+        try:
+            # Check common custom fields for acceptance criteria
+            custom_field_patterns = [
+                'customfield_10100', 'customfield_10200', 'customfield_10300',
+                'customfield_10400', 'customfield_10500', 'customfield_11000',
+                'customfield_12000', 'customfield_13000'
+            ]
+            
+            for field_name in custom_field_patterns:
+                if field_name in fields and fields[field_name]:
+                    field_value = fields[field_name]
+                    
+                    # Handle different field types
+                    if isinstance(field_value, dict):
+                        field_text = self._extract_text_from_adf(field_value)
+                    elif isinstance(field_value, str):
+                        field_text = self._clean_html(field_value)
+                    else:
+                        field_text = str(field_value)
+                    
+                    # Check if this field contains acceptance criteria
+                    if field_text and any(keyword in field_text.lower() for keyword in ['acceptance', 'criteria', 'ac:', 'given', 'when', 'then']):
+                        acceptance_criteria = field_text
+                        break
+            
+            # If not found in custom fields, look in description
+            if not acceptance_criteria and description:
+                lines = description.split('\n')
+                
+                capture = False
+                ac_lines = []
+                
+                for line in lines:
+                    line_clean = line.strip()
+                    line_lower = line_clean.lower()
+                    
+                    # Look for acceptance criteria headers
+                    if any(keyword in line_lower for keyword in ['acceptance criteria', 'acceptance', 'ac:', 'given when then']):
+                        capture = True
+                        if ':' in line_clean:
+                            ac_part = line_clean.split(':', 1)[1].strip()
+                            if ac_part:
+                                ac_lines.append(ac_part)
+                        continue
+                    
+                    if capture:
+                        if line_clean and not any(stop_word in line_lower for stop_word in ['description', 'summary', 'notes', 'background']):
+                            ac_lines.append(line_clean)
+                        elif not line_clean and ac_lines:
+                            # Empty line might indicate end of AC section
+                            break
+                
+                if ac_lines:
+                    acceptance_criteria = '\n'.join(ac_lines)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting acceptance criteria: {e}")
+        
+        return acceptance_criteria or "No acceptance criteria found"
+    
+    def _extract_attachments(self, attachments: List[dict]) -> List[Dict]:
+        """
+        Extract attachment information and content
+        """
+        attachments_info = []
+        
+        try:
+            for attachment in attachments:
+                att_info = {
+                    'filename': attachment.get('filename', 'Unknown'),
+                    'size': attachment.get('size', 0),
+                    'created': attachment.get('created', 'Unknown'),
+                    'author': attachment.get('author', {}).get('displayName', 'Unknown'),
+                    'content_summary': "",
+                    'mime_type': attachment.get('mimeType', 'Unknown')
+                }
+                
+                # Try to read attachment content if it's a text file and small enough
+                content_url = attachment.get('content')
+                if content_url and att_info['size'] < 50000:  # Only for files smaller than 50KB
+                    try:
+                        if any(file_type in att_info['mime_type'].lower() for file_type in ['text', 'json', 'xml']):
+                            response = self.session.get(content_url)
+                            if response.status_code == 200:
+                                content = response.text
+                                att_info['content_summary'] = content[:500] + "..." if len(content) > 500 else content
+                    except Exception as e:
+                        att_info['content_summary'] = f"Could not read file content: {e}"
+                
+                attachments_info.append(att_info)
+        
+        except Exception as e:
+            logging.warning(f"Error extracting attachments: {e}")
+        
+        return attachments_info
+    
+    def validate_connection(self) -> bool:
+        """Validate Jira connection"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/myself')
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logging.error(f"Jira connection validation failed: {e}")
+            return False
+    
+    def get_issue_exists(self, issue_key: str) -> bool:
+        """Check if an issue exists"""
+        try:
+            response = self.session.get(f'{self.url}/rest/api/3/issue/{issue_key}')
+            return response.status_code == 200
+        except:
+            return False, '', cleaned_text, flags=re.MULTILINE)  # Leading/trailing spaces per line
+                cleaned_text = cleaned_text.strip()
+                
+                # Normalize line breaks
+                cleaned_text = re.sub(r'\r\n', '\n', cleaned_text)
+                cleaned_text = re.sub(r'\r', '\n', cleaned_text)
+                
+                # Remove HTML entities
+                cleaned_text = cleaned_text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            
+            return cleaned_text
+            
         except Exception as e:
             logging.warning(f"Error cleaning HTML content: {e}")
             return str(text) if text else ""
@@ -272,316 +1507,3 @@ class JiraClient:
             return response.status_code == 200
         except:
             return False
-
-
-
-
-"""
-Main script for Jira Analysis System
-"""
-import logging
-import os
-import sys
-from typing import List
-import re
-from datetime import datetime
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('jira_analysis.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-# Import custom modules
-from jira_client import JiraClient
-from llm_analyzer import LLMAnalyzer
-from document_generator import DocumentGenerator
-from email_sender import EmailSender
-from config import JIRA_URL, JIRA_BEARER_TOKEN, OPENAI_API_KEY
-
-class JiraAnalysisSystem:
-    def __init__(self):
-        self.jira_client = None
-        self.llm_analyzer = None
-        self.doc_generator = None
-        self.email_sender = None
-        
-    def initialize_components(self):
-        """Initialize all system components"""
-        try:
-            # Initialize Jira client
-            if not all([JIRA_URL, JIRA_BEARER_TOKEN]):
-                raise ValueError("Jira configuration is incomplete. Please check your .env file.")
-            
-            self.jira_client = JiraClient(JIRA_URL, JIRA_BEARER_TOKEN)
-            if not self.jira_client.validate_connection():
-                raise ConnectionError("Failed to connect to Jira")
-            
-            # Initialize LLM analyzer
-            if not OPENAI_API_KEY:
-                raise ValueError("OpenAI API key is missing. Please check your .env file.")
-            
-            self.llm_analyzer = LLMAnalyzer(OPENAI_API_KEY)
-            
-            # Initialize document generator
-            self.doc_generator = DocumentGenerator()
-            
-            # Initialize email sender
-            self.email_sender = EmailSender()
-            
-            logging.info("All components initialized successfully")
-            return True
-            
-        except Exception as e:
-            logging.error(f"Failed to initialize components: {e}")
-            return False
-    
-    def get_jira_keys_from_user(self) -> List[str]:
-        """Get Jira keys from user input"""
-        while True:
-            try:
-                print("\n" + "="*60)
-                print("JIRA ANALYSIS SYSTEM")
-                print("="*60)
-                
-                jira_input = input("\nEnter Jira keys (comma-separated): ").strip()
-                
-                if not jira_input:
-                    print("❌ Please enter at least one Jira key.")
-                    continue
-                
-                # Split by comma and clean up
-                jira_keys = [key.strip().upper() for key in jira_input.split(',')]
-                
-                # Validate format (basic validation)
-                invalid_keys = []
-                valid_keys = []
-                
-                for key in jira_keys:
-                    if re.match(r'^[A-Z]+-\d+$', key):
-                        valid_keys.append(key)
-                    else:
-                        invalid_keys.append(key)
-                
-                if invalid_keys:
-                    print(f"❌ Invalid Jira key format: {', '.join(invalid_keys)}")
-                    print("   Jira keys should be in format: PROJECT-123")
-                    continue
-                
-                if valid_keys:
-                    print(f"✅ Valid Jira keys found: {', '.join(valid_keys)}")
-                    return valid_keys
-                
-            except KeyboardInterrupt:
-                print("\n❌ Operation cancelled by user.")
-                sys.exit(0)
-            except Exception as e:
-                print(f"❌ Error processing input: {e}")
-                continue
-    
-    def get_email_from_user(self) -> str:
-        """Get recipient email from user input"""
-        while True:
-            try:
-                email = input("\nEnter recipient email address: ").strip()
-                
-                if not email:
-                    print("❌ Please enter an email address.")
-                    continue
-                
-                # Basic email validation
-                if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-                    print(f"✅ Email address validated: {email}")
-                    return email
-                else:
-                    print("❌ Invalid email format. Please enter a valid email address.")
-                    continue
-                    
-            except KeyboardInterrupt:
-                print("\n❌ Operation cancelled by user.")
-                sys.exit(0)
-            except Exception as e:
-                print(f"❌ Error processing email: {e}")
-                continue
-    
-    def process_jira_issues(self, jira_keys: List[str]) -> List[dict]:
-        """Process all Jira issues and generate analysis"""
-        processed_issues = []
-        
-        print(f"\n📋 Processing {len(jira_keys)} Jira issue(s)...")
-        
-        for i, key in enumerate(jira_keys, 1):
-            try:
-                print(f"   [{i}/{len(jira_keys)}] Processing {key}...")
-                
-                # Extract issue details
-                issue_data = self.jira_client.extract_issue_details(key)
-                
-                if 'error' in issue_data:
-                    print(f"   ⚠️  Warning: Could not fully process {key}: {issue_data['error']}")
-                    processed_issues.append(issue_data)
-                    continue
-                
-                print(f"   ✅ Extracted details for {key}")
-                
-                # Generate LLM summary
-                print(f"   🤖 Generating AI analysis for {key}...")
-                llm_summary = self.llm_analyzer.analyze_issue_summary(issue_data)
-                issue_data['llm_summary'] = llm_summary
-                
-                # Generate fraud & security analysis
-                print(f"   🔒 Analyzing fraud & security implications for {key}...")
-                fraud_security = self.llm_analyzer.analyze_fraud_security(issue_data)
-                issue_data['fraud_security_analysis'] = fraud_security
-                
-                processed_issues.append(issue_data)
-                print(f"   ✅ Completed analysis for {key}")
-                
-            except Exception as e:
-                logging.error(f"Error processing {key}: {e}")
-                print(f"   ❌ Error processing {key}: {e}")
-                
-                # Add error issue to maintain the list
-                error_issue = {
-                    'key': key,
-                    'summary': f"Error processing {key}",
-                    'description': f"Failed to process issue: {str(e)}",
-                    'error': str(e),
-                    'llm_summary': f"Could not analyze {key} due to processing error.",
-                    'fraud_security_analysis': "Could not perform security analysis due to processing error."
-                }
-                processed_issues.append(error_issue)
-        
-        return processed_issues
-    
-    def generate_report(self, issues_data: List[dict], jira_keys: List[str]) -> tuple:
-        """Generate Word document and HTML summary"""
-        try:
-            print("\n📄 Generating comprehensive report...")
-            
-            # Generate executive summary
-            print("   🎯 Creating executive summary...")
-            executive_summary = self.llm_analyzer.generate_executive_summary(issues_data)
-            
-            # Generate Word document
-            print("   📋 Creating Word document...")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            doc_filename = f"jira_analysis_report_{timestamp}.docx"
-            
-            document_path = self.doc_generator.create_comprehensive_report(
-                issues_data, executive_summary, doc_filename
-            )
-            
-            # Generate HTML summary for email
-            print("   📧 Creating HTML email summary...")
-            html_summary = self.doc_generator.generate_html_summary(issues_data, executive_summary)
-            
-            print(f"   ✅ Report generated successfully: {doc_filename}")
-            return document_path, html_summary
-            
-        except Exception as e:
-            logging.error(f"Error generating report: {e}")
-            raise
-    
-    def send_email_report(self, recipient_email: str, html_content: str, 
-                         document_path: str, jira_keys: List[str]) -> bool:
-        """Send the report via email"""
-        try:
-            print(f"\n📧 Sending report to {recipient_email}...")
-            
-            # Validate email configuration
-            if not self.email_sender.validate_email_config():
-                print("   ❌ Email configuration validation failed.")
-                return False
-            
-            # Send email
-            success = self.email_sender.send_report_email(
-                recipient_email, html_content, document_path, jira_keys
-            )
-            
-            if success:
-                print("   ✅ Email sent successfully!")
-                return True
-            else:
-                print("   ❌ Failed to send email.")
-                return False
-                
-        except Exception as e:
-            logging.error(f"Error sending email: {e}")
-            print(f"   ❌ Error sending email: {e}")
-            return False
-    
-    def run(self):
-        """Main execution method"""
-        try:
-            print("🚀 Starting Jira Analysis System...")
-            
-            # Initialize components
-            if not self.initialize_components():
-                print("❌ Failed to initialize system components. Please check your configuration.")
-                return False
-            
-            # Get user inputs
-            jira_keys = self.get_jira_keys_from_user()
-            recipient_email = self.get_email_from_user()
-            
-            # Process issues
-            issues_data = self.process_jira_issues(jira_keys)
-            
-            if not issues_data:
-                print("❌ No issues were successfully processed.")
-                return False
-            
-            # Generate report
-            document_path, html_summary = self.generate_report(issues_data, jira_keys)
-            
-            # Send email
-            email_success = self.send_email_report(recipient_email, html_summary, document_path, jira_keys)
-            
-            # Final summary
-            print("\n" + "="*60)
-            print("ANALYSIS COMPLETE")
-            print("="*60)
-            print(f"📊 Issues Processed: {len(issues_data)}")
-            print(f"📄 Report Generated: {document_path}")
-            print(f"📧 Email Status: {'✅ Sent' if email_success else '❌ Failed'}")
-            
-            if not email_success:
-                print(f"📁 You can find the report at: {os.path.abspath(document_path)}")
-            
-            print("\n🎉 Jira Analysis System completed successfully!")
-            return True
-            
-        except KeyboardInterrupt:
-            print("\n❌ Operation cancelled by user.")
-            return False
-        except Exception as e:
-            logging.error(f"System error: {e}")
-            print(f"❌ System error: {e}")
-            return False
-
-def main():
-    """Main entry point"""
-    system = JiraAnalysisSystem()
-    success = system.run()
-    sys.exit(0 if success else 1)
-
-if __name__ == "__main__":
-    main()
-
-
-
-requests==2.31.0
-python-docx==0.8.11
-openai==1.3.7
-smtplib-ssl==1.0.0
-email-validator==2.1.0
-python-dotenv==1.0.0
-beautifulsoup4==4.12.2
-lxml==4.9.4
-
-
