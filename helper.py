@@ -50,21 +50,63 @@ class GitRepoAnalyzer:
             logger.info(f"Created directory: {directory}")
     
     def clone_repository(self, branch: str = "main"):
-        """Clone the GitLab repository"""
+        """Clone the GitLab repository with detailed error reporting"""
         try:
             if self.repo_dir.exists():
+                logger.info(f"Removing existing repository directory: {self.repo_dir}")
                 shutil.rmtree(self.repo_dir)
-                logger.info("Removed existing repository directory")
+                logger.info("✅ Existing directory removed")
             
-            logger.info(f"Cloning repository: {self.repo_url}")
-            git.Repo.clone_from(self.repo_url, self.repo_dir, branch=branch)
-            logger.info("Repository cloned successfully")
+            logger.info(f"🔄 Cloning repository: {self.repo_url}")
+            logger.info(f"🔄 Target branch: {branch}")
+            logger.info(f"🔄 Target directory: {self.repo_dir}")
             
-        except git.exc.GitCommandError as e:
-            logger.error(f"Git clone failed: {e}")
-            raise
+            # Try cloning with more detailed error handling
+            try:
+                repo = git.Repo.clone_from(
+                    self.repo_url, 
+                    self.repo_dir, 
+                    branch=branch,
+                    progress=lambda op_code, cur_count, max_count, message: 
+                        logger.info(f"Cloning progress: {message or 'Processing...'}")
+                )
+                logger.info("✅ Repository cloned successfully")
+                
+                # Verify the clone
+                if not self.repo_dir.exists():
+                    raise Exception("Clone appeared successful but directory doesn't exist")
+                    
+                # Check if it's a valid git repository
+                if not (self.repo_dir / '.git').exists():
+                    raise Exception("Cloned directory is not a valid git repository")
+                    
+                # Count files in repository
+                total_items = len(list(self.repo_dir.rglob('*')))
+                logger.info(f"✅ Repository contains {total_items} items")
+                
+            except git.exc.GitCommandError as git_error:
+                logger.error(f"Git command failed: {git_error}")
+                logger.error("Common causes:")
+                logger.error("1. Repository URL is incorrect")
+                logger.error("2. Branch doesn't exist")
+                logger.error("3. No access permissions")
+                logger.error("4. Network connectivity issues")
+                logger.error("5. Git not installed or not in PATH")
+                
+                # Try to get more specific error info
+                if "Authentication failed" in str(git_error):
+                    logger.error("🔐 Authentication issue - check your Git credentials")
+                elif "not found" in str(git_error).lower():
+                    logger.error("🔍 Repository or branch not found")
+                elif "permission denied" in str(git_error).lower():
+                    logger.error("🚫 Permission denied - check repository access")
+                
+                raise git_error
+                
         except Exception as e:
-            logger.error(f"Unexpected error during cloning: {e}")
+            logger.error(f"❌ Repository cloning failed: {e}")
+            logger.error(f"Repository URL: {self.repo_url}")
+            logger.error(f"Branch: {branch}")
             raise
     
     def scan_repository(self) -> Dict[str, List[Path]]:
@@ -308,28 +350,68 @@ class GitRepoAnalyzer:
         return summary
     
     def run_analysis(self, repo_branch: str = "main"):
-        """Run the complete analysis pipeline"""
+        """Run the complete analysis pipeline with detailed error reporting"""
+        step = "initialization"
         try:
+            logger.info("=" * 60)
             logger.info("Starting Git repository analysis...")
+            logger.info(f"Repository URL: {self.repo_url}")
+            logger.info(f"Branch: {repo_branch}")
+            logger.info(f"Output directory: {self.output_dir}")
+            logger.info("=" * 60)
             
-            # Setup
+            # Step 1: Setup directories
+            step = "directory setup"
+            logger.info(f"STEP 1: {step}")
             self.setup_directories()
+            logger.info("✅ Directories created successfully")
             
-            # Clone repository
+            # Step 2: Clone repository
+            step = "repository cloning"
+            logger.info(f"STEP 2: {step}")
             self.clone_repository(repo_branch)
+            logger.info("✅ Repository cloned successfully")
             
-            # Scan and categorize files
+            # Step 3: Verify repository contents
+            step = "repository verification"
+            logger.info(f"STEP 3: {step}")
+            if not self.repo_dir.exists():
+                raise Exception(f"Repository directory not found: {self.repo_dir}")
+            
+            repo_files = list(self.repo_dir.rglob('*'))
+            logger.info(f"Repository contains {len(repo_files)} total items")
+            
+            # Step 4: Scan and categorize files
+            step = "file scanning"
+            logger.info(f"STEP 4: {step}")
             file_categories = self.scan_repository()
             
-            # Process files
+            total_files = sum(len(files) for files in file_categories.values())
+            if total_files == 0:
+                logger.warning("⚠️  No files found to analyze!")
+                logger.info("Repository structure:")
+                for item in list(self.repo_dir.iterdir())[:10]:  # Show first 10 items
+                    logger.info(f"  - {item.name} ({'dir' if item.is_dir() else 'file'})")
+            
+            logger.info("✅ File scanning completed")
+            
+            # Step 5: Process files
+            step = "file processing"
+            logger.info(f"STEP 5: {step}")
             all_files_data = self.process_files(file_categories)
+            logger.info("✅ File processing completed")
             
-            # Create summary
+            # Step 6: Create summary
+            step = "summary generation"
+            logger.info(f"STEP 6: {step}")
             summary = self.create_summary_report(all_files_data)
+            logger.info("✅ Summary report generated")
             
-            logger.info("Analysis completed successfully!")
-            logger.info(f"Results saved in: {self.analysis_dir}")
-            logger.info(f"Total files analyzed: {len(all_files_data)}")
+            logger.info("=" * 60)
+            logger.info("🎉 Analysis completed successfully!")
+            logger.info(f"📁 Results saved in: {self.analysis_dir}")
+            logger.info(f"📊 Total files analyzed: {len(all_files_data)}")
+            logger.info("=" * 60)
             
             return {
                 'success': True,
@@ -339,10 +421,41 @@ class GitRepoAnalyzer:
             }
             
         except Exception as e:
-            logger.error(f"Analysis failed: {e}")
+            logger.error("=" * 60)
+            logger.error(f"❌ Analysis failed at step: {step}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            
+            # Additional debugging info
+            if step == "repository cloning":
+                logger.error(f"Repository URL: {self.repo_url}")
+                logger.error(f"Target directory: {self.repo_dir}")
+                logger.error("Please check:")
+                logger.error("1. Repository URL is correct and accessible")
+                logger.error("2. You have proper Git credentials configured")
+                logger.error("3. The branch name exists")
+                
+            elif step == "file scanning":
+                if self.repo_dir.exists():
+                    logger.error("Repository was cloned but no analyzable files found")
+                    logger.error("Repository contents:")
+                    try:
+                        for item in list(self.repo_dir.iterdir())[:20]:
+                            logger.error(f"  - {item.name}")
+                    except:
+                        logger.error("Could not list repository contents")
+            
+            # Print full traceback for debugging
+            import traceback
+            logger.error("Full traceback:")
+            logger.error(traceback.format_exc())
+            logger.error("=" * 60)
+            
             return {
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'step_failed': step,
+                'error_type': type(e).__name__
             }
 
 def main():
@@ -350,19 +463,100 @@ def main():
     parser.add_argument('repo_url', help='GitLab repository URL')
     parser.add_argument('--branch', default='main', help='Git branch to analyze (default: main)')
     parser.add_argument('--output', default='analysis_output', help='Output directory (default: analysis_output)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--test-git', action='store_true', help='Test Git installation')
     
     args = parser.parse_args()
+    
+    # Set logging level
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
+    
+    # Test Git installation if requested
+    if args.test_git:
+        test_git_installation()
+        return
+    
+    # Validate repository URL
+    if not args.repo_url.strip():
+        print("❌ Repository URL cannot be empty")
+        exit(1)
+    
+    if not (args.repo_url.startswith('http://') or args.repo_url.startswith('https://') or args.repo_url.startswith('git@')):
+        print("❌ Repository URL should start with http://, https://, or git@")
+        print(f"Provided URL: {args.repo_url}")
+        exit(1)
+    
+    print(f"🚀 Starting analysis...")
+    print(f"📍 Repository: {args.repo_url}")
+    print(f"🌿 Branch: {args.branch}")
+    print(f"📁 Output: {args.output}")
+    print("-" * 50)
     
     analyzer = GitRepoAnalyzer(args.repo_url, args.output)
     result = analyzer.run_analysis(args.branch)
     
+    print("\n" + "=" * 60)
     if result['success']:
-        print(f"\n✅ Analysis completed successfully!")
+        print("🎉 ANALYSIS COMPLETED SUCCESSFULLY!")
         print(f"📁 Output directory: {result['output_directory']}")
         print(f"📊 Files processed: {result['files_processed']}")
+        print("\n📋 Generated files:")
+        output_dir = Path(result['output_directory'])
+        if output_dir.exists():
+            for file in output_dir.glob('*.json'):
+                size = file.stat().st_size
+                print(f"   - {file.name} ({size:,} bytes)")
     else:
-        print(f"\n❌ Analysis failed: {result['error']}")
+        print("❌ ANALYSIS FAILED!")
+        print(f"💥 Error: {result['error']}")
+        print(f"📍 Failed at step: {result.get('step_failed', 'unknown')}")
+        print(f"🔧 Error type: {result.get('error_type', 'unknown')}")
+        print("\n🔍 Troubleshooting tips:")
+        print("   1. Check if Git is installed: git --version")
+        print("   2. Verify repository URL and access permissions")
+        print("   3. Try with --debug flag for more details")
+        print("   4. Use --test-git to test Git installation")
         exit(1)
+
+def test_git_installation():
+    """Test if Git is properly installed and configured"""
+    print("🧪 Testing Git installation...")
+    
+    try:
+        import git
+        print("✅ GitPython library is installed")
+        
+        # Test Git executable
+        git_version = git.cmd.Git().version()
+        print(f"✅ Git version: {git_version}")
+        
+        # Test basic Git functionality
+        print("✅ Git is working properly")
+        
+        # Check Git configuration
+        try:
+            git_config = git.cmd.Git()
+            user_name = git_config.config('--get', 'user.name')
+            user_email = git_config.config('--get', 'user.email')
+            print(f"✅ Git user: {user_name} <{user_email}>")
+        except:
+            print("⚠️  Git user not configured (might cause issues with some repositories)")
+            print("   Configure with: git config --global user.name 'Your Name'")
+            print("   Configure with: git config --global user.email 'your.email@example.com'")
+        
+    except ImportError:
+        print("❌ GitPython library not installed")
+        print("   Install with: pip install GitPython")
+    except Exception as e:
+        print(f"❌ Git test failed: {e}")
+        print("   Make sure Git is installed and in your PATH")
+    
+    print("\n🔧 If you're having issues:")
+    print("   1. Install Git: https://git-scm.com/downloads")
+    print("   2. Install GitPython: pip install GitPython")
+    print("   3. Configure Git credentials for private repositories")
 
 if __name__ == "__main__":
     main()
