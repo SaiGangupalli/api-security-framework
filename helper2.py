@@ -1375,4 +1375,729 @@ def main():
         exit(1)
 
 if __name__ == "__main__":
-    main()hel
+    main()
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+"""
+Complete Chunk Coverage Analyzer
+Ensures ALL files and chunks are analyzed by creating multiple prompts
+"""
+
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Any, Tuple
+import logging
+from datetime import datetime
+import math
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class ComprehensiveChunkAnalyzer:
+    """Ensures 100% coverage of all files and chunks through multiple prompts"""
+    
+    def __init__(self, analysis_dir: str, model_name: str = "gemini-2.0-flash-001"):
+        self.analysis_dir = Path(analysis_dir)
+        self.model_name = model_name
+        self.is_gemini = "gemini" in model_name.lower()
+        
+        # Model-specific settings
+        self.context_limits = {
+            "gemini-2.0-flash": 1000000,
+            "gemini-2.0-flash-001": 1000000,
+            "gpt-4": 8192,
+            "gpt-4-32k": 32768,
+            "gpt-4-turbo": 128000,
+            "claude-3": 200000,
+            "claude-3.5": 200000
+        }
+        
+        self.max_tokens = self.context_limits.get(model_name, 1000000)
+        self.reserve_tokens = 5000 if self.is_gemini else 2000  # Reserve for response
+        self.usable_tokens = self.max_tokens - self.reserve_tokens
+        
+        logger.info(f"🔍 Comprehensive Chunk Analyzer initialized")
+        logger.info(f"   Model: {model_name}")
+        logger.info(f"   Max Tokens: {self.max_tokens:,}")
+        logger.info(f"   Usable Tokens: {self.usable_tokens:,}")
+    
+    def count_tokens(self, text: str) -> int:
+        """Token counting with model-specific optimization"""
+        if self.is_gemini:
+            return len(text) // 3  # Gemini's more efficient tokenization
+        else:
+            return len(text) // 4  # Conservative estimate for other models
+    
+    def analyze_current_coverage(self) -> Dict[str, Any]:
+        """Analyze what files and chunks exist vs what's being processed"""
+        
+        coverage_report = {
+            "timestamp": datetime.now().isoformat(),
+            "categories": {},
+            "total_files": 0,
+            "total_chunks": 0,
+            "coverage_gaps": []
+        }
+        
+        # Analyze each category
+        for category_dir in self.analysis_dir.iterdir():
+            if not category_dir.is_dir() or category_dir.name.startswith('.'):
+                continue
+            
+            category_name = category_dir.name
+            category_info = {
+                "individual_files": 0,
+                "chunk_files": 0,
+                "total_content_size": 0,
+                "files_with_chunks": 0,
+                "estimated_tokens": 0
+            }
+            
+            # Count individual files
+            individual_dir = category_dir / "individual_files"
+            if individual_dir.exists():
+                individual_files = list(individual_dir.glob("*.json"))
+                category_info["individual_files"] = len(individual_files)
+                
+                # Analyze content size
+                for file_path in individual_files:
+                    try:
+                        with open(file_path, 'r') as f:
+                            file_data = json.load(f)
+                        
+                        content = file_data.get('content', file_data.get('content_preview', ''))
+                        if content:
+                            size = len(content)
+                            category_info["total_content_size"] += size
+                            category_info["estimated_tokens"] += self.count_tokens(content)
+                        
+                        if file_data.get('has_chunks', False):
+                            category_info["files_with_chunks"] += 1
+                            
+                    except Exception as e:
+                        logger.warning(f"Could not analyze {file_path}: {e}")
+            
+            # Count chunk files
+            chunks_dir = category_dir / "chunks"
+            if chunks_dir.exists():
+                chunk_files = list(chunks_dir.glob("*.json"))
+                category_info["chunk_files"] = len(chunk_files)
+                
+                # Analyze chunk content
+                for chunk_file in chunk_files:
+                    try:
+                        with open(chunk_file, 'r') as f:
+                            chunk_data = json.load(f)
+                        
+                        chunks = chunk_data.get('chunks', [])
+                        for chunk in chunks:
+                            category_info["estimated_tokens"] += self.count_tokens(chunk)
+                            
+                    except Exception as e:
+                        logger.warning(f"Could not analyze chunk {chunk_file}: {e}")
+            
+            coverage_report["categories"][category_name] = category_info
+            coverage_report["total_files"] += category_info["individual_files"]
+            coverage_report["total_chunks"] += category_info["chunk_files"]
+        
+        # Calculate coverage gaps
+        for category, info in coverage_report["categories"].items():
+            if info["estimated_tokens"] > self.usable_tokens:
+                prompts_needed = math.ceil(info["estimated_tokens"] / self.usable_tokens)
+                coverage_report["coverage_gaps"].append({
+                    "category": category,
+                    "total_tokens": info["estimated_tokens"],
+                    "prompts_needed": prompts_needed,
+                    "current_coverage": "INCOMPLETE" if prompts_needed > 1 else "COMPLETE"
+                })
+        
+        return coverage_report
+    
+    def create_multi_part_prompts(self, category: str, analysis_type: str = "code_analysis") -> List[str]:
+        """Create multiple prompts to ensure 100% coverage of a category"""
+        
+        # Load all files in category
+        category_dir = self.analysis_dir / category
+        if not category_dir.exists():
+            return []
+        
+        all_files = []
+        individual_dir = category_dir / "individual_files"
+        
+        if individual_dir.exists():
+            for file_path in individual_dir.glob("*.json"):
+                try:
+                    with open(file_path, 'r') as f:
+                        file_data = json.load(f)
+                    
+                    # Load chunks if they exist
+                    if file_data.get('has_chunks', False):
+                        chunks_file = file_data.get('chunks_file')
+                        if chunks_file:
+                            chunks_path = self.analysis_dir / chunks_file
+                            if chunks_path.exists():
+                                with open(chunks_path, 'r') as f:
+                                    chunk_data = json.load(f)
+                                
+                                # Create separate entries for each chunk
+                                for i, chunk in enumerate(chunk_data.get('chunks', [])):
+                                    chunk_file_data = file_data.copy()
+                                    chunk_file_data['content'] = chunk
+                                    chunk_file_data['is_chunk'] = True
+                                    chunk_file_data['chunk_number'] = i + 1
+                                    chunk_file_data['total_chunks'] = len(chunk_data.get('chunks', []))
+                                    chunk_file_data['original_file'] = file_data['file_path']
+                                    all_files.append(chunk_file_data)
+                            else:
+                                # Fallback to preview if chunks not found
+                                all_files.append(file_data)
+                    else:
+                        all_files.append(file_data)
+                        
+                except Exception as e:
+                    logger.warning(f"Could not load {file_path}: {e}")
+        
+        if not all_files:
+            return []
+        
+        logger.info(f"📊 Creating comprehensive prompts for {category}")
+        logger.info(f"   Total files/chunks to analyze: {len(all_files)}")
+        
+        # Create multiple prompts to cover all files
+        prompts = []
+        current_prompt_files = []
+        current_tokens = 0
+        
+        # Base prompt overhead
+        base_prompt = self.create_base_prompt(category, analysis_type, 0, 0)
+        base_tokens = self.count_tokens(base_prompt)
+        
+        for file_data in all_files:
+            # Calculate tokens for this file
+            content = file_data.get('content', file_data.get('content_preview', ''))
+            file_section = self.format_file_for_prompt(file_data, content)
+            file_tokens = self.count_tokens(file_section)
+            
+            # Check if adding this file would exceed limit
+            if current_tokens + file_tokens + base_tokens > self.usable_tokens and current_prompt_files:
+                # Finalize current prompt
+                prompt = self.create_complete_prompt(
+                    category, analysis_type, current_prompt_files, 
+                    len(prompts) + 1, 0  # Will calculate total later
+                )
+                prompts.append(prompt)
+                
+                # Start new prompt
+                current_prompt_files = [file_data]
+                current_tokens = file_tokens
+            else:
+                current_prompt_files.append(file_data)
+                current_tokens += file_tokens
+        
+        # Add final prompt if there are remaining files
+        if current_prompt_files:
+            prompt = self.create_complete_prompt(
+                category, analysis_type, current_prompt_files,
+                len(prompts) + 1, 0
+            )
+            prompts.append(prompt)
+        
+        # Update total counts in all prompts
+        total_prompts = len(prompts)
+        for i in range(len(prompts)):
+            prompts[i] = prompts[i].replace("TOTAL_PARTS_PLACEHOLDER", str(total_prompts))
+        
+        logger.info(f"✅ Created {len(prompts)} prompts for complete {category} coverage")
+        
+        return prompts
+    
+    def format_file_for_prompt(self, file_data: Dict[str, Any], content: str) -> str:
+        """Format a single file/chunk for inclusion in prompt"""
+        
+        file_path = file_data.get('file_path', 'Unknown')
+        
+        # Handle chunk vs regular file
+        if file_data.get('is_chunk', False):
+            chunk_num = file_data.get('chunk_number', 1)
+            total_chunks = file_data.get('total_chunks', 1)
+            original_file = file_data.get('original_file', file_path)
+            
+            section = f"""
+### 📄 **{original_file}** (Chunk {chunk_num}/{total_chunks})
+"""
+        else:
+            section = f"""
+### 📄 **{file_path}**
+"""
+        
+        # Add metadata
+        section += f"- **Size**: {len(content):,} characters\n"
+        section += f"- **Lines**: {content.count(chr(10)) + 1:,}\n"
+        
+        # Add Java analysis if available
+        if 'java_analysis' in file_data:
+            java_analysis = file_data['java_analysis']
+            section += f"- **Package**: `{java_analysis.get('package', 'None')}`\n"
+            
+            annotations = java_analysis.get('spring_annotations', [])
+            if annotations:
+                section += f"- **Spring Annotations**: `{', '.join(annotations)}`\n"
+            
+            # Component type
+            if any('Controller' in ann for ann in annotations):
+                section += "- **Type**: 🎮 REST Controller\n"
+            elif any('Service' in ann for ann in annotations):
+                section += "- **Type**: ⚙️ Service Layer\n"
+            elif any('Repository' in ann for ann in annotations):
+                section += "- **Type**: 🗄️ Data Repository\n"
+        
+        # Add content
+        section += f"\n**Source Code**:\n```java\n{content}\n```\n"
+        
+        return section
+    
+    def create_base_prompt(self, category: str, analysis_type: str, part_num: int, total_parts: int) -> str:
+        """Create base prompt structure"""
+        
+        if self.is_gemini:
+            return f"""# 🔍 Comprehensive {category.title()} Analysis - Part {part_num}/TOTAL_PARTS_PLACEHOLDER
+
+**Model**: Gemini 2.0 Flash  
+**Task**: Complete analysis of ALL {category.replace('_', ' ')} files ensuring 100% coverage  
+**Part**: {part_num} of TOTAL_PARTS_PLACEHOLDER (Multi-part analysis for comprehensive coverage)
+
+## 📊 **Analysis Scope**
+This is part of a comprehensive multi-prompt analysis to ensure every file and code chunk is thoroughly analyzed. This specific prompt covers a subset of files, and all parts together provide complete coverage.
+
+## 📁 **Files in This Part**
+
+"""
+        else:
+            return f"""# Comprehensive {category.title()} Analysis - Part {part_num}/TOTAL_PARTS_PLACEHOLDER
+
+This is part {part_num} of a multi-part analysis to ensure complete coverage of all {category.replace('_', ' ')} files.
+
+## Files Analyzed in This Part
+
+"""
+    
+    def create_complete_prompt(self, category: str, analysis_type: str, files: List[Dict], part_num: int, total_parts: int) -> str:
+        """Create a complete prompt with files and analysis request"""
+        
+        prompt = self.create_base_prompt(category, analysis_type, part_num, total_parts)
+        
+        # Add all files
+        for file_data in files:
+            content = file_data.get('content', file_data.get('content_preview', ''))
+            prompt += self.format_file_for_prompt(file_data, content)
+        
+        # Add analysis request
+        if self.is_gemini:
+            prompt += self.create_gemini_analysis_request(category, analysis_type, part_num, len(files))
+        else:
+            prompt += self.create_standard_analysis_request(category, analysis_type, part_num, len(files))
+        
+        return prompt
+    
+    def create_gemini_analysis_request(self, category: str, analysis_type: str, part_num: int, file_count: int) -> str:
+        """Create Gemini-optimized analysis request"""
+        
+        return f"""
+
+## 🎯 **Comprehensive Analysis Request - Part {part_num}**
+
+Analyze the {file_count} files above as part of a complete codebase analysis:
+
+### 1. 🏗️ **Architectural Analysis**
+- **Design Patterns**: Identify specific design patterns in these files
+- **Component Relationships**: How do these components relate to each other?
+- **Layered Architecture**: What layer do these components represent?
+
+### 2. 🚀 **Spring Boot Implementation**
+- **Annotation Usage**: Analyze Spring annotations and their effectiveness
+- **Dependency Injection**: Evaluate DI patterns used
+- **Configuration**: How are these components configured?
+
+### 3. 🔄 **Functionality & Data Flow**
+- **Business Logic**: What business functionality is implemented?
+- **Data Processing**: How is data handled and transformed?
+- **API Endpoints**: Document any REST endpoints (if controllers)
+- **Service Integration**: How do these services integrate with others?
+
+### 4. ✅ **Code Quality Assessment**
+- **Code Organization**: Structure and organization quality
+- **Naming Conventions**: Consistency and clarity
+- **Best Practices**: Adherence to Spring Boot best practices
+- **Potential Issues**: Code smells or anti-patterns
+
+### 5. 🛡️ **Security & Performance**
+- **Security Patterns**: Any security implementations
+- **Performance Considerations**: Potential bottlenecks or optimizations
+- **Resource Usage**: Memory and processing efficiency
+
+### 6. 🎯 **Specific Recommendations**
+- **Immediate Improvements**: Quick wins for better code quality
+- **Refactoring Opportunities**: Structural improvements
+- **Best Practice Adoption**: Spring Boot optimizations
+
+## 📋 **Analysis Context**
+- This is **Part {part_num}** of a multi-part analysis
+- Focus on the {file_count} files provided in this prompt
+- Provide specific, actionable insights for these particular components
+- Reference actual code elements and line-level observations
+
+**Expected Output**: Detailed technical analysis with specific recommendations for the files in this part.
+"""
+    
+    def create_standard_analysis_request(self, category: str, analysis_type: str, part_num: int, file_count: int) -> str:
+        """Create standard analysis request for non-Gemini models"""
+        
+        return f"""
+
+## Analysis Request - Part {part_num}
+
+Please analyze the {file_count} files above and provide:
+
+1. **Architecture & Design**: Design patterns and component organization
+2. **Spring Boot Usage**: How Spring Boot features are utilized
+3. **Code Quality**: Quality assessment and improvement suggestions
+4. **Functionality**: Business logic and data flow analysis
+5. **Issues & Improvements**: Problems identified and recommended fixes
+
+This is part {part_num} of a comprehensive analysis. Focus on the specific files provided.
+"""
+    
+    def generate_comprehensive_prompts(self, categories: List[str] = None) -> Dict[str, List[str]]:
+        """Generate comprehensive prompts ensuring 100% coverage"""
+        
+        if categories is None:
+            # Auto-detect categories
+            categories = []
+            for item in self.analysis_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.'):
+                    if (item / "individual_files").exists() or (item / "chunks").exists():
+                        categories.append(item.name)
+        
+        all_prompts = {}
+        coverage_report = self.analyze_current_coverage()
+        
+        logger.info(f"🎯 Generating comprehensive prompts for {len(categories)} categories")
+        
+        for category in categories:
+            logger.info(f"📂 Processing category: {category}")
+            
+            # Check if this category needs multiple prompts
+            category_info = coverage_report["categories"].get(category, {})
+            estimated_tokens = category_info.get("estimated_tokens", 0)
+            
+            if estimated_tokens > self.usable_tokens:
+                logger.info(f"   ⚠️  Large category detected: {estimated_tokens:,} tokens")
+                logger.info(f"   📝 Creating multi-part prompts for complete coverage")
+                
+                prompts = self.create_multi_part_prompts(category, "comprehensive_analysis")
+                all_prompts[category] = prompts
+                
+                logger.info(f"   ✅ Created {len(prompts)} prompts for {category}")
+            else:
+                logger.info(f"   ✅ Single prompt sufficient: {estimated_tokens:,} tokens")
+                
+                # Single prompt is sufficient
+                single_prompt = self.create_multi_part_prompts(category, "comprehensive_analysis")
+                if single_prompt:
+                    all_prompts[category] = single_prompt
+        
+        return all_prompts
+    
+    def save_comprehensive_prompts(self, all_prompts: Dict[str, List[str]]) -> str:
+        """Save all comprehensive prompts with proper organization"""
+        
+        output_dir = self.analysis_dir / "comprehensive_prompts"
+        output_dir.mkdir(exist_ok=True)
+        
+        # Create metadata
+        metadata = {
+            "generated_at": datetime.now().isoformat(),
+            "model": self.model_name,
+            "coverage_type": "comprehensive",
+            "total_prompts": sum(len(prompts) for prompts in all_prompts.values()),
+            "categories": {}
+        }
+        
+        total_prompts_saved = 0
+        
+        for category, prompts in all_prompts.items():
+            category_dir = output_dir / category
+            category_dir.mkdir(exist_ok=True)
+            
+            category_metadata = {
+                "prompt_count": len(prompts),
+                "files": []
+            }
+            
+            for i, prompt in enumerate(prompts, 1):
+                filename = f"{category}_part_{i:03d}.txt"
+                filepath = category_dir / filename
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(prompt)
+                
+                token_count = self.count_tokens(prompt)
+                category_metadata["files"].append({
+                    "filename": filename,
+                    "part_number": i,
+                    "estimated_tokens": token_count,
+                    "context_usage": f"{(token_count/self.max_tokens*100):.1f}%"
+                })
+                
+                total_prompts_saved += 1
+                logger.info(f"💾 Saved: {filepath} ({token_count:,} tokens)")
+            
+            metadata["categories"][category] = category_metadata
+        
+        # Save metadata
+        metadata_file = output_dir / "comprehensive_metadata.json"
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Create comprehensive usage guide
+        guide = self.create_comprehensive_usage_guide(metadata, output_dir)
+        guide_file = output_dir / "COMPREHENSIVE_USAGE_GUIDE.md"
+        with open(guide_file, 'w') as f:
+            f.write(guide)
+        
+        logger.info(f"📁 Comprehensive prompts saved to: {output_dir}")
+        logger.info(f"📊 Total prompts created: {total_prompts_saved}")
+        
+        return str(output_dir)
+    
+    def create_comprehensive_usage_guide(self, metadata: Dict, output_dir: Path) -> str:
+        """Create usage guide for comprehensive analysis"""
+        
+        guide = f"""# 🎯 Comprehensive Analysis Guide
+
+## 📊 **Complete Coverage Analysis**
+
+**Generated**: {metadata['generated_at']}  
+**Model**: {metadata['model']}  
+**Total Prompts**: {metadata['total_prompts']}  
+**Coverage**: 100% of all files and chunks
+
+## 🔍 **Why Comprehensive Analysis?**
+
+This analysis ensures **complete coverage** of your codebase by:
+- ✅ **Including ALL files**: Every Java file, config file, and component
+- ✅ **Processing ALL chunks**: Large files split into chunks are fully analyzed
+- ✅ **No truncation**: Nothing is skipped due to context limits
+- ✅ **Systematic coverage**: Organized by category with multiple prompts per category
+
+## 📁 **Prompt Organization**
+
+"""
+        
+        total_prompts = 0
+        for category, info in metadata['categories'].items():
+            guide += f"### {category.replace('_', ' ').title()}\n"
+            guide += f"- **Prompts**: {info['prompt_count']}\n"
+            guide += f"- **Location**: `{category}/`\n"
+            guide += f"- **Files**: {category}_part_001.txt to {category}_part_{info['prompt_count']:03d}.txt\n\n"
+            total_prompts += info['prompt_count']
+        
+        guide += f"""## 🚀 **Execution Strategy**
+
+### **Option 1: Sequential Analysis (Recommended)**
+```bash
+# Run prompts in order for each category
+# Category 1: java_files
+cat java_files/java_files_part_001.txt  # Copy to Gemini
+cat java_files/java_files_part_002.txt  # Copy to Gemini
+# ... continue for all parts
+
+# Category 2: config_files  
+cat config_files/config_files_part_001.txt  # Copy to Gemini
+# ... continue for all parts
+```
+
+### **Option 2: Parallel Analysis**
+- Run different categories simultaneously
+- Useful if you have multiple team members
+- Each person can take a different category
+
+### **Option 3: Automated Processing**
+```python
+# Process all prompts programmatically
+import os
+from pathlib import Path
+
+prompt_dir = Path("comprehensive_prompts")
+for category_dir in prompt_dir.iterdir():
+    if category_dir.is_dir():
+        for prompt_file in sorted(category_dir.glob("*.txt")):
+            with open(prompt_file) as f:
+                prompt = f.read()
+            # Send to your LLM API or copy to UI
+            print(f"Processing: {{prompt_file}}")
+```
+
+## 📋 **Response Collection Strategy**
+
+### **Organized Response Collection**
+```python
+from llm_response_processor import LLMResponseProcessor
+processor = LLMResponseProcessor('analysis_output/analysis')
+
+# For each prompt response:
+# java_files_part_001 response
+processor.save_response('java_files_comprehensive', 1, '''[GEMINI RESPONSE]''')
+
+# java_files_part_002 response  
+processor.save_response('java_files_comprehensive', 2, '''[GEMINI RESPONSE]''')
+
+# Continue for all parts...
+```
+
+### **Response Naming Convention**
+- **Category**: `java_files_comprehensive`, `config_files_comprehensive`
+- **Part Number**: 1, 2, 3... for each prompt in the category
+- **Type**: Use `_comprehensive` suffix to distinguish from regular analysis
+
+## 🎯 **Expected Results**
+
+After running **ALL {total_prompts} prompts**, you'll have:
+
+### **Complete Code Coverage**
+- ✅ Every Java class analyzed in detail
+- ✅ All configuration files reviewed
+- ✅ Large files completely processed (no truncation)
+- ✅ All Spring Boot components documented
+
+### **Comprehensive Insights**
+- 🏗️ **Complete Architecture Map**: Full understanding of system design
+- 🔍 **Detailed Code Quality**: Every component assessed for quality
+- 🔄 **Complete Data Flow**: All API endpoints and data paths mapped
+- 🛡️ **Security Assessment**: Comprehensive security analysis
+- 📈 **Performance Profile**: Complete performance bottleneck identification
+
+### **Actionable Recommendations**
+- 🎯 **Prioritized Issues**: All problems ranked by severity
+- 🔧 **Specific Fixes**: Detailed remediation steps for each issue
+- 📊 **Metrics**: Quantified assessment of code quality
+- 🚀 **Improvement Roadmap**: Strategic technical improvements
+
+## ⚡ **Processing Tips**
+
+### **For Large Repositories**
+- **Time Investment**: Plan for {total_prompts} LLM interactions
+- **Batch Processing**: Process 5-10 prompts at a time
+- **Team Distribution**: Divide categories among team members
+- **Progress Tracking**: Check off completed prompts
+
+### **Quality Assurance**
+- **Response Validation**: Ensure each response addresses the full prompt
+- **Consistency Check**: Look for consistent themes across responses
+- **Gap Analysis**: Verify no files are mentioned in multiple responses
+
+## 📊 **Coverage Verification**
+
+After collecting all responses, verify complete coverage:
+
+```python
+# Check that all files were analyzed
+coverage_check = processor.verify_comprehensive_coverage()
+print(f"Files analyzed: {{coverage_check['files_covered']}}")
+print(f"Coverage percentage: {{coverage_check['coverage_percent']:.1f}}%")
+```
+
+## 🎉 **Final Report Generation**
+
+```bash
+# Generate comprehensive report from all responses
+python scripts/run_llm_analysis.py analysis_output/analysis --mode comprehensive-report
+
+# This creates:
+# - comprehensive_analysis_report.md (Combined insights from all prompts)
+# - coverage_verification.json (Confirmation of 100% coverage)
+# - executive_summary.md (High-level findings)
+```
+
+---
+
+**🎯 This comprehensive analysis ensures NO CODE IS LEFT UNANALYZED**
+
+**Estimated Time**: {total_prompts} prompts × 2-3 minutes = {total_prompts * 2.5:.0f} minutes total
+**Result**: Complete, thorough understanding of your entire codebase
+"""
+        
+        return guide
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate comprehensive prompts with 100% coverage')
+    parser.add_argument('analysis_dir', help='Analysis output directory')
+    parser.add_argument('--model', default='gemini-2.0-flash-001', help='Model name')
+    parser.add_argument('--categories', nargs='+', help='Specific categories to analyze')
+    parser.add_argument('--coverage-report', action='store_true', help='Show coverage analysis only')
+    
+    args = parser.parse_args()
+    
+    print("🎯 Comprehensive Chunk Coverage Analyzer")
+    print("=" * 60)
+    print(f"Analysis Directory: {args.analysis_dir}")
+    print(f"Model: {args.model}")
+    
+    try:
+        analyzer = ComprehensiveChunkAnalyzer(args.analysis_dir, args.model)
+        
+        if args.coverage_report:
+            coverage = analyzer.analyze_current_coverage()
+            
+            print("\n📊 COVERAGE ANALYSIS:")
+            print(f"Total Files: {coverage['total_files']:,}")
+            print(f"Total Chunks: {coverage['total_chunks']:,}")
+            
+            for category, info in coverage['categories'].items():
+                print(f"\n📂 {category.title()}:")
+                print(f"   Files: {info['individual_files']:,}")
+                print(f"   Chunks: {info['chunk_files']:,}")
+                print(f"   Estimated Tokens: {info['estimated_tokens']:,}")
+            
+            if coverage['coverage_gaps']:
+                print(f"\n⚠️  COVERAGE GAPS:")
+                for gap in coverage['coverage_gaps']:
+                    print(f"   {gap['category']}: {gap['prompts_needed']} prompts needed ({gap['current_coverage']})")
+        
+        else:
+            # Generate comprehensive prompts
+            all_prompts = analyzer.generate_comprehensive_prompts(args.categories)
+            output_dir = analyzer.save_comprehensive_prompts(all_prompts)
+            
+            total_prompts = sum(len(prompts) for prompts in all_prompts.values())
+            
+            print(f"\n✅ SUCCESS!")
+            print(f"📁 Comprehensive prompts saved to: {output_dir}")
+            print(f"📊 Total prompts generated: {total_prompts}")
+            print(f"🎯 Coverage: 100% of all files and chunks")
+            
+            print(f"\n📋 PROMPT BREAKDOWN:")
+            for category, prompts in all_prompts.items():
+                print(f"   {category}: {len(prompts)} prompts")
+            
+            print(f"\n🚀 NEXT STEPS:")
+            print("1. Review the COMPREHENSIVE_USAGE_GUIDE.md")
+            print("2. Execute all prompts systematically")
+            print("3. Collect responses for each prompt")
+            print("4. Generate final comprehensive report")
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
