@@ -1,0 +1,1206 @@
+#!/usr/bin/env python3
+"""
+LLM Analysis Engine for Git Repository Analysis Output
+Feeds analysis data to LLMs for project summarization and data flow understanding
+"""
+
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+import logging
+from datetime import datetime
+import tiktoken
+import re
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class LLMAnalysisEngine:
+    """Engine to prepare and feed repository analysis to LLMs"""
+    
+    def __init__(self, analysis_dir: str, model_name: str = "gpt-4"):
+        self.analysis_dir = Path(analysis_dir)
+        self.model_name = model_name
+        
+        # Token counting for different models
+        try:
+            self.encoding = tiktoken.encoding_for_model(model_name)
+        except:
+            self.encoding = tiktoken.get_encoding("cl100k_base")  # Default for GPT-4
+        
+        # Context limits for different models
+        self.context_limits = {
+            "gpt-4": 8192,
+            "gpt-4-32k": 32768,
+            "gpt-3.5-turbo": 4096,
+            "gpt-3.5-turbo-16k": 16384,
+            "claude-3": 200000,
+            "claude-3.5": 200000
+        }
+        
+        self.max_tokens = self.context_limits.get(model_name, 8192)
+        logger.info(f"Initialized LLM Analysis Engine for {model_name} (max tokens: {self.max_tokens})")
+    
+    def count_tokens(self, text: str) -> int:
+        """Count tokens in text"""
+        try:
+            return len(self.encoding.encode(text))
+        except:
+            # Fallback estimation: ~4 chars per token
+            return len(text) // 4
+    
+    def load_analysis_summary(self) -> Dict[str, Any]:
+        """Load the main analysis summary"""
+        summary_file = self.analysis_dir / "summary_report.json"
+        if not summary_file.exists():
+            raise FileNotFoundError(f"Summary report not found: {summary_file}")
+        
+        with open(summary_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def load_category_data(self, category: str, limit_files: int = None) -> Dict[str, Any]:
+        """Load data for a specific category with optional file limit"""
+        category_dir = self.analysis_dir / category
+        
+        if not category_dir.exists():
+            logger.warning(f"Category directory not found: {category_dir}")
+            return {}
+        
+        # Load category summary
+        summary_file = category_dir / "summary.json"
+        category_data = {"summary": {}, "files": []}
+        
+        if summary_file.exists():
+            with open(summary_file, 'r', encoding='utf-8') as f:
+                category_data["summary"] = json.load(f)
+        
+        # Load individual files
+        individual_files_dir = category_dir / "individual_files"
+        if individual_files_dir.exists():
+            files = list(individual_files_dir.glob("*.json"))
+            if limit_files:
+                files = files[:limit_files]
+            
+            for file_path in files:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        file_data = json.load(f)
+                        category_data["files"].append(file_data)
+                except Exception as e:
+                    logger.warning(f"Could not load {file_path}: {e}")
+        
+        return category_data
+    
+    def create_project_overview_prompt(self) -> str:
+        """Create a comprehensive project overview prompt"""
+        summary = self.load_analysis_summary()
+        
+        prompt = f"""# Spring Boot Project Analysis
+
+I have analyzed a Git repository and need you to provide a comprehensive project overview. Here's the analysis data:
+
+## Repository Information
+- **Repository URL**: {summary.get('repository_url', 'Unknown')}
+- **Analysis Date**: {summary.get('analysis_timestamp', 'Unknown')}
+- **Total Files Analyzed**: {summary.get('total_files_analyzed', 0)}
+
+## File Categories
+"""
+        
+        if 'categories' in summary:
+            for category in summary['categories']:
+                if isinstance(category, dict):
+                    prompt += f"- **{category.get('category', 'Unknown')}**: {category.get('file_count', 0)} files\n"
+        
+        prompt += "\n## Spring Boot Features Detected\n"
+        
+        if 'spring_boot_features' in summary:
+            features = summary['spring_boot_features']
+            if isinstance(features, dict) and 'note' not in features:
+                prompt += f"- **Controllers**: {features.get('controllers', 0)}\n"
+                prompt += f"- **Services**: {features.get('services', 0)}\n"
+                prompt += f"- **Repositories**: {features.get('repositories', 0)}\n"
+                prompt += f"- **Components**: {features.get('components', 0)}\n"
+        
+        if 'sample_packages' in summary:
+            prompt += f"\n## Sample Package Structure\n"
+            for package in summary['sample_packages'][:10]:  # Show top 10
+                prompt += f"- {package}\n"
+        
+        prompt += """
+
+## Analysis Request
+
+Please provide:
+
+1. **Project Type & Architecture**: What type of Spring Boot application is this? (REST API, microservice, web app, etc.)
+
+2. **Technology Stack**: What technologies and frameworks are being used?
+
+3. **Architecture Patterns**: What architectural patterns can you identify? (MVC, layered architecture, microservices, etc.)
+
+4. **Main Components**: What are the key components and their purposes?
+
+5. **Business Domain**: Based on package names and structure, what business domain does this appear to serve?
+
+6. **Code Quality Observations**: Any observations about code organization and structure?
+
+7. **Recommendations**: Any recommendations for improvements or further analysis?
+
+Please provide a structured analysis based on this high-level information.
+"""
+        
+        return prompt
+    
+    def create_detailed_code_analysis_prompt(self, category: str = "java_files", max_files: int = 10) -> str:
+        """Create detailed code analysis prompt for specific category"""
+        category_data = self.load_category_data(category, limit_files=max_files)
+        
+        if not category_data.get("files"):
+            return f"No files found in category: {category}"
+        
+        prompt = f"""# Detailed {category.title()} Analysis
+
+I need you to analyze the following {category} from a Spring Boot project for detailed insights:
+
+## Files to Analyze ({len(category_data['files'])} files)
+
+"""
+        
+        # Add file contents with token management
+        current_tokens = self.count_tokens(prompt)
+        files_added = 0
+        
+        for file_data in category_data["files"]:
+            file_prompt = f"""
+### File: {file_data.get('file_path', 'Unknown')}
+**Size**: {file_data.get('size', 0)} bytes
+**Lines**: {file_data.get('lines', 0)}
+
+"""
+            
+            # Add Java analysis if available
+            if 'java_analysis' in file_data:
+                java_analysis = file_data['java_analysis']
+                file_prompt += f"**Package**: {java_analysis.get('package', 'None')}\n"
+                file_prompt += f"**Spring Annotations**: {', '.join(java_analysis.get('spring_annotations', []))}\n"
+                file_prompt += f"**Import Count**: {java_analysis.get('import_count', 0)}\n\n"
+            
+            # Add content (preview or full)
+            if 'content' in file_data:
+                content = file_data['content']
+            elif 'content_preview' in file_data:
+                content = file_data['content_preview']
+                file_prompt += "*(Content preview - full content was chunked)*\n\n"
+            else:
+                content = "Content not available"
+            
+            file_prompt += f"```java\n{content}\n```\n\n"
+            
+            # Check token limit
+            file_tokens = self.count_tokens(file_prompt)
+            if current_tokens + file_tokens > self.max_tokens - 1000:  # Reserve 1000 tokens for response
+                prompt += f"*(Truncated due to token limit - showing {files_added} of {len(category_data['files'])} files)*\n\n"
+                break
+            
+            prompt += file_prompt
+            current_tokens += file_tokens
+            files_added += 1
+        
+        prompt += """
+## Analysis Request
+
+Please provide detailed analysis covering:
+
+1. **Code Architecture**: How are these files organized? What patterns do you see?
+
+2. **Spring Boot Usage**: How is Spring Boot being utilized? What annotations and features are used?
+
+3. **Data Flow**: Can you trace the data flow between these components?
+
+4. **Business Logic**: What business functionality can you identify?
+
+5. **Dependencies & Relationships**: How do these files relate to each other?
+
+6. **Code Quality**: Assessment of code quality, naming conventions, structure
+
+7. **Security Considerations**: Any security patterns or potential concerns?
+
+8. **Performance Considerations**: Any performance-related observations?
+
+9. **Potential Issues**: Any code smells, anti-patterns, or areas for improvement?
+
+10. **Recommendations**: Specific recommendations for improvements
+"""
+        
+        return prompt
+    
+    def create_data_flow_analysis_prompt(self) -> str:
+        """Create prompt specifically for data flow analysis"""
+        # Load key components
+        java_data = self.load_category_data("java_files", limit_files=20)
+        config_data = self.load_category_data("config_files", limit_files=5)
+        
+        prompt = """# Data Flow Analysis Request
+
+I need you to analyze the data flow in this Spring Boot application. Here's the relevant code:
+
+## Configuration Files
+"""
+        
+        # Add config files
+        for file_data in config_data.get("files", []):
+            if file_data.get('size', 0) < 5000:  # Only include smaller config files
+                prompt += f"""
+### {file_data.get('file_path', 'Unknown')}
+```
+{file_data.get('content', file_data.get('content_preview', 'Content not available'))}
+```
+"""
+        
+        prompt += "\n## Java Components\n"
+        
+        # Add Java files with focus on controllers, services, repositories
+        current_tokens = self.count_tokens(prompt)
+        
+        # Prioritize important files
+        important_files = []
+        other_files = []
+        
+        for file_data in java_data.get("files", []):
+            if 'java_analysis' in file_data:
+                annotations = file_data['java_analysis'].get('spring_annotations', [])
+                if any('Controller' in ann or 'Service' in ann or 'Repository' in ann for ann in annotations):
+                    important_files.append(file_data)
+                else:
+                    other_files.append(file_data)
+            else:
+                other_files.append(file_data)
+        
+        # Add important files first
+        for file_data in important_files + other_files:
+            file_content = f"""
+### {file_data.get('file_path', 'Unknown')}
+**Type**: {', '.join(file_data.get('java_analysis', {}).get('spring_annotations', []))}
+**Package**: {file_data.get('java_analysis', {}).get('package', 'Unknown')}
+
+```java
+{file_data.get('content', file_data.get('content_preview', 'Content not available'))}
+```
+"""
+            
+            if current_tokens + self.count_tokens(file_content) > self.max_tokens - 1500:
+                break
+                
+            prompt += file_content
+            current_tokens += self.count_tokens(file_content)
+        
+        prompt += """
+
+## Data Flow Analysis Request
+
+Please analyze and provide:
+
+1. **Request Flow**: Trace how HTTP requests flow through the application
+   - Entry points (Controllers)
+   - Service layer interactions
+   - Data access layer (Repositories)
+   - Response generation
+
+2. **Data Models**: What data models/entities can you identify?
+
+3. **API Endpoints**: List all REST endpoints with their purposes
+
+4. **Service Dependencies**: Map dependencies between services
+
+5. **Database Interactions**: How does the application interact with data storage?
+
+6. **Configuration Impact**: How do configuration files affect data flow?
+
+7. **Integration Points**: External service integrations or APIs
+
+8. **Data Transformation**: Where and how is data transformed?
+
+9. **Error Handling**: How are errors handled in the data flow?
+
+10. **Flow Diagram**: Provide a textual representation of the main data flows
+
+Please be specific and reference actual code elements you see in the analysis.
+"""
+        
+        return prompt
+    
+    def create_chunked_analysis_prompts(self, category: str, analysis_type: str = "code_review") -> List[str]:
+        """Create multiple smaller prompts for large datasets"""
+        category_data = self.load_category_data(category)
+        files = category_data.get("files", [])
+        
+        if not files:
+            return []
+        
+        prompts = []
+        current_prompt = f"# {analysis_type.title()} - Part {{part_num}} of {{total_parts}}\n\n"
+        current_tokens = self.count_tokens(current_prompt)
+        current_files = []
+        
+        for file_data in files:
+            file_content = self._format_file_for_prompt(file_data)
+            file_tokens = self.count_tokens(file_content)
+            
+            # If adding this file would exceed limit, finalize current prompt
+            if current_tokens + file_tokens > self.max_tokens - 1000:
+                if current_files:  # Only add if we have files
+                    prompts.append(self._finalize_chunk_prompt(current_prompt, current_files, analysis_type))
+                
+                # Start new prompt
+                current_prompt = f"# {analysis_type.title()} - Part {{part_num}} of {{total_parts}}\n\n"
+                current_tokens = self.count_tokens(current_prompt)
+                current_files = []
+            
+            current_prompt += file_content
+            current_tokens += file_tokens
+            current_files.append(file_data)
+        
+        # Add final prompt if there are remaining files
+        if current_files:
+            prompts.append(self._finalize_chunk_prompt(current_prompt, current_files, analysis_type))
+        
+        # Update part numbers
+        total_parts = len(prompts)
+        for i, prompt in enumerate(prompts):
+            prompts[i] = prompt.format(part_num=i+1, total_parts=total_parts)
+        
+        return prompts
+    
+    def _format_file_for_prompt(self, file_data: Dict[str, Any]) -> str:
+        """Format a file for inclusion in prompt"""
+        content = f"""
+## File: {file_data.get('file_path', 'Unknown')}
+**Size**: {file_data.get('size', 0)} bytes | **Lines**: {file_data.get('lines', 0)}
+"""
+        
+        if 'java_analysis' in file_data:
+            java_analysis = file_data['java_analysis']
+            content += f"**Package**: {java_analysis.get('package', 'None')}\n"
+            content += f"**Spring Annotations**: {', '.join(java_analysis.get('spring_annotations', []))}\n"
+        
+        file_content = file_data.get('content', file_data.get('content_preview', 'Content not available'))
+        content += f"\n```java\n{file_content}\n```\n\n"
+        
+        return content
+    
+    def _finalize_chunk_prompt(self, base_prompt: str, files: List[Dict], analysis_type: str) -> str:
+        """Finalize a chunk prompt with analysis request"""
+        prompt = base_prompt
+        
+        if analysis_type == "code_review":
+            prompt += """
+## Analysis Request for This Chunk
+
+Please analyze these files and provide:
+
+1. **Code Quality Assessment**: Overall quality, patterns, conventions
+2. **Spring Boot Usage**: How Spring Boot features are utilized
+3. **Architecture Observations**: Architectural patterns and structure
+4. **Potential Issues**: Any problems or areas for improvement
+5. **Dependencies**: Relationships between these files
+6. **Recommendations**: Specific improvement suggestions
+
+Focus on the files in this chunk and note any patterns or issues you observe.
+"""
+        elif analysis_type == "data_flow":
+            prompt += """
+## Data Flow Analysis for This Chunk
+
+Please analyze the data flow in these files:
+
+1. **Component Interactions**: How do these components interact?
+2. **Data Processing**: What data processing occurs?
+3. **API Endpoints**: Any REST endpoints defined?
+4. **Service Dependencies**: Dependencies on other services
+5. **Data Models**: Data structures used
+6. **Flow Patterns**: Common flow patterns observed
+
+Focus specifically on how data moves through these components.
+"""
+        
+        return prompt
+    
+    def generate_analysis_prompts(self, analysis_types: List[str] = None) -> Dict[str, List[str]]:
+        """Generate all analysis prompts"""
+        if analysis_types is None:
+            analysis_types = ["project_overview", "code_analysis", "data_flow", "chunked_review"]
+        
+        prompts = {}
+        
+        for analysis_type in analysis_types:
+            try:
+                if analysis_type == "project_overview":
+                    prompts[analysis_type] = [self.create_project_overview_prompt()]
+                elif analysis_type == "code_analysis":
+                    prompts[analysis_type] = [self.create_detailed_code_analysis_prompt()]
+                elif analysis_type == "data_flow":
+                    prompts[analysis_type] = [self.create_data_flow_analysis_prompt()]
+                elif analysis_type == "chunked_review":
+                    prompts[analysis_type] = self.create_chunked_analysis_prompts("java_files", "code_review")
+                elif analysis_type == "chunked_data_flow":
+                    prompts[analysis_type] = self.create_chunked_analysis_prompts("java_files", "data_flow")
+                else:
+                    logger.warning(f"Unknown analysis type: {analysis_type}")
+            except Exception as e:
+                logger.error(f"Error generating {analysis_type} prompts: {e}")
+                prompts[analysis_type] = []
+        
+        return prompts
+    
+    def save_prompts_to_files(self, prompts: Dict[str, List[str]], output_dir: str = None):
+        """Save generated prompts to files"""
+        if output_dir is None:
+            output_dir = self.analysis_dir / "llm_prompts"
+        else:
+            output_dir = Path(output_dir)
+        
+        output_dir.mkdir(exist_ok=True)
+        
+        prompt_index = {
+            "generated_at": datetime.now().isoformat(),
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "prompts": {}
+        }
+        
+        for analysis_type, prompt_list in prompts.items():
+            if not prompt_list:
+                continue
+                
+            type_dir = output_dir / analysis_type
+            type_dir.mkdir(exist_ok=True)
+            
+            prompt_index["prompts"][analysis_type] = {
+                "count": len(prompt_list),
+                "files": []
+            }
+            
+            for i, prompt in enumerate(prompt_list):
+                filename = f"{analysis_type}_part_{i+1:03d}.txt"
+                filepath = type_dir / filename
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(prompt)
+                
+                prompt_index["prompts"][analysis_type]["files"].append(str(filepath.relative_to(output_dir)))
+                logger.info(f"Saved prompt: {filepath}")
+        
+        # Save index
+        index_file = output_dir / "prompt_index.json"
+        with open(index_file, 'w', encoding='utf-8') as f:
+            json.dump(prompt_index, f, indent=2)
+        
+        logger.info(f"Generated {sum(len(p) for p in prompts.values())} prompts in {output_dir}")
+        return str(output_dir)
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Generate LLM analysis prompts from repository analysis')
+    parser.add_argument('analysis_dir', help='Analysis output directory')
+    parser.add_argument('--model', default='gpt-4', help='LLM model name (default: gpt-4)')
+    parser.add_argument('--output', help='Output directory for prompts (default: analysis_dir/llm_prompts)')
+    parser.add_argument('--types', nargs='+', 
+                       choices=['project_overview', 'code_analysis', 'data_flow', 'chunked_review', 'chunked_data_flow'],
+                       help='Analysis types to generate')
+    
+    args = parser.parse_args()
+    
+    print("🤖 LLM Analysis Engine")
+    print("=" * 50)
+    print(f"Analysis Directory: {args.analysis_dir}")
+    print(f"Model: {args.model}")
+    print(f"Analysis Types: {args.types or 'All'}")
+    print("-" * 50)
+    
+    try:
+        engine = LLMAnalysisEngine(args.analysis_dir, args.model)
+        prompts = engine.generate_analysis_prompts(args.types)
+        
+        total_prompts = sum(len(p) for p in prompts.values())
+        print(f"✅ Generated {total_prompts} prompts")
+        
+        # Save prompts
+        output_dir = engine.save_prompts_to_files(prompts, args.output)
+        print(f"📁 Prompts saved to: {output_dir}")
+        
+        # Show summary
+        print("\n📊 PROMPT SUMMARY:")
+        for analysis_type, prompt_list in prompts.items():
+            if prompt_list:
+                print(f"  {analysis_type}: {len(prompt_list)} prompts")
+        
+        print(f"\n💡 NEXT STEPS:")
+        print("1. Copy prompts to your LLM interface (ChatGPT, Claude, etc.)")
+        print("2. Run each prompt and collect responses")
+        print("3. Combine insights for comprehensive project understanding")
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+"""
+LLM Response Processor and Report Generator
+Processes LLM responses and creates comprehensive project reports
+"""
+
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+import logging
+from datetime import datetime
+import re
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class LLMResponseProcessor:
+    """Process LLM responses and generate comprehensive reports"""
+    
+    def __init__(self, analysis_dir: str):
+        self.analysis_dir = Path(analysis_dir)
+        self.responses_dir = self.analysis_dir / "llm_responses"
+        self.reports_dir = self.analysis_dir / "llm_reports"
+        
+        # Create directories
+        self.responses_dir.mkdir(exist_ok=True)
+        self.reports_dir.mkdir(exist_ok=True)
+        
+        logger.info(f"Initialized LLM Response Processor for {analysis_dir}")
+    
+    def save_response(self, analysis_type: str, part_num: int, response: str, metadata: Dict = None):
+        """Save an LLM response with metadata"""
+        if metadata is None:
+            metadata = {}
+        
+        response_data = {
+            "analysis_type": analysis_type,
+            "part_number": part_num,
+            "timestamp": datetime.now().isoformat(),
+            "response": response,
+            "metadata": metadata
+        }
+        
+        filename = f"{analysis_type}_part_{part_num:03d}_response.json"
+        filepath = self.responses_dir / filename
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(response_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Saved response: {filepath}")
+        return str(filepath)
+    
+    def load_responses(self, analysis_type: str = None) -> Dict[str, List[Dict]]:
+        """Load all responses, optionally filtered by analysis type"""
+        responses = {}
+        
+        if not self.responses_dir.exists():
+            return responses
+        
+        for response_file in self.responses_dir.glob("*_response.json"):
+            try:
+                with open(response_file, 'r', encoding='utf-8') as f:
+                    response_data = json.load(f)
+                
+                resp_type = response_data.get("analysis_type", "unknown")
+                
+                if analysis_type and resp_type != analysis_type:
+                    continue
+                
+                if resp_type not in responses:
+                    responses[resp_type] = []
+                
+                responses[resp_type].append(response_data)
+            
+            except Exception as e:
+                logger.warning(f"Could not load response {response_file}: {e}")
+        
+        # Sort responses by part number
+        for resp_type in responses:
+            responses[resp_type].sort(key=lambda x: x.get("part_number", 0))
+        
+        return responses
+    
+    def extract_key_insights(self, response_text: str) -> Dict[str, List[str]]:
+        """Extract key insights from LLM response using patterns"""
+        insights = {
+            "architecture_patterns": [],
+            "technologies": [],
+            "issues": [],
+            "recommendations": [],
+            "endpoints": [],
+            "components": [],
+            "data_flow": []
+        }
+        
+        # Define patterns to extract information
+        patterns = {
+            "architecture_patterns": [
+                r"(?i)(?:architecture|pattern|design).*?(?:mvc|microservice|layered|rest|api|service|repository)",
+                r"(?i)(?:uses|implements|follows).*?(?:pattern|architecture)"
+            ],
+            "technologies": [
+                r"(?i)(?:spring|hibernate|jpa|mysql|postgresql|redis|kafka|docker|kubernetes)",
+                r"(?i)(?:framework|library|database|technology).*?(?:spring|hibernate|jpa)"
+            ],
+            "issues": [
+                r"(?i)(?:issue|problem|concern|warning|risk|vulnerability)",
+                r"(?i)(?:should|could|might|potential|recommend).*?(?:fix|improve|address)"
+            ],
+            "recommendations": [
+                r"(?i)(?:recommend|suggest|should|consider|improve)",
+                r"(?i)(?:best practice|better approach|optimization)"
+            ],
+            "endpoints": [
+                r"(?i)(?:endpoint|api|route).*?(?:GET|POST|PUT|DELETE|/[a-zA-Z0-9/_-]+)",
+                r"(?:[/@][a-zA-Z0-9/_-]+(?:\{[^}]+\})?)"
+            ],
+            "components": [
+                r"(?i)(?:controller|service|repository|component|bean)",
+                r"(?i)(?:class|interface).*?(?:Controller|Service|Repository|Component)"
+            ]
+        }
+        
+        lines = response_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            for category, pattern_list in patterns.items():
+                for pattern in pattern_list:
+                    if re.search(pattern, line):
+                        # Clean up the line
+                        clean_line = re.sub(r'^[-*•]\s*', '', line)  # Remove bullet points
+                        clean_line = re.sub(r'^\d+\.\s*', '', clean_line)  # Remove numbers
+                        
+                        if len(clean_line) > 20 and clean_line not in insights[category]:
+                            insights[category].append(clean_line[:200])  # Limit length
+        
+        return insights
+    
+    def generate_project_overview_report(self) -> str:
+        """Generate project overview report"""
+        responses = self.load_responses("project_overview")
+        
+        if "project_overview" not in responses:
+            return "No project overview responses found."
+        
+        report = """# Project Overview Report
+
+## Summary
+"""
+        
+        for response_data in responses["project_overview"]:
+            response_text = response_data.get("response", "")
+            report += f"\n{response_text}\n"
+        
+        return report
+    
+    def generate_code_analysis_report(self) -> str:
+        """Generate comprehensive code analysis report"""
+        responses = self.load_responses("code_analysis")
+        chunked_responses = self.load_responses("chunked_review")
+        
+        report = """# Code Analysis Report
+
+## Detailed Analysis
+"""
+        
+        # Add main code analysis
+        if "code_analysis" in responses:
+            for response_data in responses["code_analysis"]:
+                response_text = response_data.get("response", "")
+                report += f"\n{response_text}\n"
+        
+        # Add chunked analysis summary
+        if "chunked_review" in chunked_responses:
+            report += "\n## Additional Code Review Insights\n"
+            
+            all_insights = {
+                "architecture_patterns": set(),
+                "technologies": set(),
+                "issues": set(),
+                "recommendations": set(),
+                "components": set()
+            }
+            
+            for response_data in chunked_responses["chunked_review"]:
+                response_text = response_data.get("response", "")
+                insights = self.extract_key_insights(response_text)
+                
+                for category, items in insights.items():
+                    if category in all_insights:
+                        all_insights[category].update(items)
+            
+            for category, items in all_insights.items():
+                if items:
+                    report += f"\n### {category.replace('_', ' ').title()}\n"
+                    for item in sorted(items)[:10]:  # Limit to top 10
+                        report += f"- {item}\n"
+        
+        return report
+    
+    def generate_data_flow_report(self) -> str:
+        """Generate data flow analysis report"""
+        responses = self.load_responses("data_flow")
+        chunked_responses = self.load_responses("chunked_data_flow")
+        
+        report = """# Data Flow Analysis Report
+
+## Request Flow & Architecture
+"""
+        
+        # Add main data flow analysis
+        if "data_flow" in responses:
+            for response_data in responses["data_flow"]:
+                response_text = response_data.get("response", "")
+                report += f"\n{response_text}\n"
+        
+        # Extract and summarize endpoints and components
+        if "chunked_data_flow" in chunked_responses:
+            report += "\n## Data Flow Summary\n"
+            
+            all_endpoints = set()
+            all_components = set()
+            
+            for response_data in chunked_responses["chunked_data_flow"]:
+                response_text = response_data.get("response", "")
+                insights = self.extract_key_insights(response_text)
+                
+                all_endpoints.update(insights.get("endpoints", []))
+                all_components.update(insights.get("components", []))
+            
+            if all_endpoints:
+                report += "\n### Identified API Endpoints\n"
+                for endpoint in sorted(all_endpoints)[:20]:
+                    report += f"- {endpoint}\n"
+            
+            if all_components:
+                report += "\n### Key Components\n"
+                for component in sorted(all_components)[:15]:
+                    report += f"- {component}\n"
+        
+        return report
+    
+    def generate_comprehensive_report(self) -> str:
+        """Generate a comprehensive report combining all analyses"""
+        responses = self.load_responses()
+        
+        if not responses:
+            return "No LLM responses found. Please run analysis first."
+        
+        report = f"""# Comprehensive Project Analysis Report
+
+**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Analysis Types**: {', '.join(responses.keys())}
+
+---
+
+"""
+        
+        # Project Overview Section
+        if "project_overview" in responses:
+            report += "## 📋 Project Overview\n\n"
+            for response_data in responses["project_overview"]:
+                report += response_data.get("response", "") + "\n\n"
+        
+        # Code Analysis Section
+        code_types = ["code_analysis", "chunked_review"]
+        code_responses = []
+        for code_type in code_types:
+            if code_type in responses:
+                code_responses.extend(responses[code_type])
+        
+        if code_responses:
+            report += "## 🔍 Code Analysis\n\n"
+            
+            # Combine insights from all code analysis responses
+            combined_insights = {
+                "architecture_patterns": set(),
+                "technologies": set(),
+                "issues": set(),
+                "recommendations": set(),
+                "components": set()
+            }
+            
+            for response_data in code_responses:
+                response_text = response_data.get("response", "")
+                
+                # Add full response for first detailed analysis
+                if response_data.get("analysis_type") == "code_analysis":
+                    report += f"### Detailed Analysis\n{response_text}\n\n"
+                
+                # Extract insights for summary
+                insights = self.extract_key_insights(response_text)
+                for category, items in insights.items():
+                    if category in combined_insights:
+                        combined_insights[category].update(items)
+            
+            # Add consolidated insights
+            report += "### Consolidated Insights\n\n"
+            for category, items in combined_insights.items():
+                if items:
+                    report += f"**{category.replace('_', ' ').title()}:**\n"
+                    for item in sorted(items)[:8]:  # Top 8 items
+                        report += f"- {item}\n"
+                    report += "\n"
+        
+        # Data Flow Section
+        data_flow_types = ["data_flow", "chunked_data_flow"]
+        data_flow_responses = []
+        for df_type in data_flow_types:
+            if df_type in responses:
+                data_flow_responses.extend(responses[df_type])
+        
+        if data_flow_responses:
+            report += "## 🔄 Data Flow Analysis\n\n"
+            
+            # Add main data flow analysis
+            for response_data in data_flow_responses:
+                if response_data.get("analysis_type") == "data_flow":
+                    report += response_data.get("response", "") + "\n\n"
+                    break
+            
+            # Extract and summarize key data flow elements
+            all_endpoints = set()
+            all_components = set()
+            data_flows = set()
+            
+            for response_data in data_flow_responses:
+                response_text = response_data.get("response", "")
+                insights = self.extract_key_insights(response_text)
+                
+                all_endpoints.update(insights.get("endpoints", []))
+                all_components.update(insights.get("components", []))
+                data_flows.update(insights.get("data_flow", []))
+            
+            if all_endpoints:
+                report += "### API Endpoints Summary\n"
+                for endpoint in sorted(all_endpoints)[:15]:
+                    report += f"- {endpoint}\n"
+                report += "\n"
+            
+            if all_components:
+                report += "### Component Architecture\n"
+                for component in sorted(all_components)[:12]:
+                    report += f"- {component}\n"
+                report += "\n"
+        
+        # Overall Recommendations
+        all_recommendations = set()
+        all_issues = set()
+        
+        for response_type, response_list in responses.items():
+            for response_data in response_list:
+                response_text = response_data.get("response", "")
+                insights = self.extract_key_insights(response_text)
+                all_recommendations.update(insights.get("recommendations", []))
+                all_issues.update(insights.get("issues", []))
+        
+        if all_recommendations or all_issues:
+            report += "## 💡 Summary & Recommendations\n\n"
+            
+            if all_issues:
+                report += "### Key Issues Identified\n"
+                for issue in sorted(all_issues)[:10]:
+                    report += f"- {issue}\n"
+                report += "\n"
+            
+            if all_recommendations:
+                report += "### Recommendations\n"
+                for recommendation in sorted(all_recommendations)[:10]:
+                    report += f"- {recommendation}\n"
+                report += "\n"
+        
+        # Metadata
+        report += "---\n\n"
+        report += f"**Total Responses Processed**: {sum(len(r) for r in responses.values())}\n"
+        report += f"**Analysis Types**: {len(responses)}\n"
+        
+        return report
+    
+    def create_response_template(self, analysis_type: str, part_num: int = 1) -> str:
+        """Create a template for collecting LLM responses"""
+        template = f"""# LLM Response Collection Template
+
+**Analysis Type**: {analysis_type}
+**Part Number**: {part_num}
+**Date**: {datetime.now().strftime('%Y-%m-%d')}
+
+## Instructions
+1. Copy the prompt from: `llm_prompts/{analysis_type}/`
+2. Run it in your LLM (ChatGPT, Claude, etc.)
+3. Paste the response below
+4. Save this file or use the save_response() method
+
+## LLM Response
+```
+[PASTE YOUR LLM RESPONSE HERE]
+```
+
+## Additional Notes
+- Model used: 
+- Temperature: 
+- Any special instructions: 
+
+---
+**Next Steps**: Run `save_response("{analysis_type}", {part_num}, response_text)` to process this response.
+"""
+        return template
+    
+    def interactive_response_collector(self):
+        """Interactive CLI for collecting LLM responses"""
+        print("🤖 Interactive LLM Response Collector")
+        print("=" * 50)
+        
+        # List available prompt types
+        prompts_dir = self.analysis_dir / "llm_prompts"
+        if not prompts_dir.exists():
+            print("❌ No prompts directory found. Run the LLM analyzer first.")
+            return
+        
+        available_types = [d.name for d in prompts_dir.iterdir() if d.is_dir()]
+        
+        if not available_types:
+            print("❌ No prompt types found.")
+            return
+        
+        print("Available analysis types:")
+        for i, analysis_type in enumerate(available_types, 1):
+            prompt_files = list((prompts_dir / analysis_type).glob("*.txt"))
+            print(f"  {i}. {analysis_type} ({len(prompt_files)} prompts)")
+        
+        while True:
+            try:
+                choice = input("\nSelect analysis type (number) or 'q' to quit: ").strip()
+                
+                if choice.lower() == 'q':
+                    break
+                
+                if not choice.isdigit() or int(choice) < 1 or int(choice) > len(available_types):
+                    print("Invalid choice. Please try again.")
+                    continue
+                
+                analysis_type = available_types[int(choice) - 1]
+                self._collect_responses_for_type(analysis_type)
+                
+            except KeyboardInterrupt:
+                print("\nExiting...")
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+    
+    def _collect_responses_for_type(self, analysis_type: str):
+        """Collect responses for a specific analysis type"""
+        prompts_dir = self.analysis_dir / "llm_prompts" / analysis_type
+        prompt_files = sorted(prompts_dir.glob("*.txt"))
+        
+        print(f"\n📝 Collecting responses for: {analysis_type}")
+        print(f"Found {len(prompt_files)} prompts")
+        
+        for i, prompt_file in enumerate(prompt_files, 1):
+            print(f"\n--- Prompt {i}/{len(prompt_files)} ---")
+            print(f"File: {prompt_file.name}")
+            
+            # Show a preview of the prompt
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                prompt_content = f.read()
+            
+            print("Preview:")
+            print(prompt_content[:200] + "..." if len(prompt_content) > 200 else prompt_content)
+            
+            action = input("\n[c]opy prompt, [s]kip, [v]iew full, [q]uit: ").strip().lower()
+            
+            if action == 'q':
+                break
+            elif action == 's':
+                continue
+            elif action == 'v':
+                print("\n" + "="*50)
+                print(prompt_content)
+                print("="*50)
+                input("Press Enter to continue...")
+                continue
+            elif action == 'c':
+                # Copy to clipboard if available
+                try:
+                    import pyperclip
+                    pyperclip.copy(prompt_content)
+                    print("✅ Prompt copied to clipboard!")
+                except ImportError:
+                    print("📋 Clipboard not available. Here's the prompt:")
+                    print("\n" + "="*50)
+                    print(prompt_content)
+                    print("="*50)
+                
+                # Collect response
+                print("\nAfter running this in your LLM, paste the response below.")
+                print("Press Enter twice when finished, or type 'skip' to skip this prompt.")
+                
+                response_lines = []
+                empty_lines = 0
+                
+                while True:
+                    line = input()
+                    if line.strip().lower() == 'skip':
+                        break
+                    if line.strip() == '':
+                        empty_lines += 1
+                        if empty_lines >= 2:
+                            break
+                    else:
+                        empty_lines = 0
+                    response_lines.append(line)
+                
+                if response_lines and response_lines != ['skip']:
+                    response_text = '\n'.join(response_lines).strip()
+                    if response_text:
+                        self.save_response(analysis_type, i, response_text)
+                        print(f"✅ Response saved for {analysis_type} part {i}")
+    
+    def generate_all_reports(self) -> Dict[str, str]:
+        """Generate all available reports"""
+        reports = {}
+        
+        try:
+            reports["project_overview"] = self.generate_project_overview_report()
+        except Exception as e:
+            logger.error(f"Error generating project overview: {e}")
+        
+        try:
+            reports["code_analysis"] = self.generate_code_analysis_report()
+        except Exception as e:
+            logger.error(f"Error generating code analysis: {e}")
+        
+        try:
+            reports["data_flow"] = self.generate_data_flow_report()
+        except Exception as e:
+            logger.error(f"Error generating data flow report: {e}")
+        
+        try:
+            reports["comprehensive"] = self.generate_comprehensive_report()
+        except Exception as e:
+            logger.error(f"Error generating comprehensive report: {e}")
+        
+        return reports
+    
+    def save_reports(self, reports: Dict[str, str] = None):
+        """Save all reports to files"""
+        if reports is None:
+            reports = self.generate_all_reports()
+        
+        saved_files = []
+        
+        for report_type, content in reports.items():
+            if content and content.strip():
+                filename = f"{report_type}_report.md"
+                filepath = self.reports_dir / filename
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                saved_files.append(str(filepath))
+                logger.info(f"Saved report: {filepath}")
+        
+        # Create index file
+        index_content = f"""# LLM Analysis Reports
+
+**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+## Available Reports
+
+"""
+        
+        for report_type in reports.keys():
+            if reports[report_type] and reports[report_type].strip():
+                index_content += f"- [{report_type.replace('_', ' ').title()}]({report_type}_report.md)\n"
+        
+        index_content += f"""
+## Usage
+
+1. **Project Overview**: High-level summary and architecture
+2. **Code Analysis**: Detailed code review and quality assessment  
+3. **Data Flow**: Request flow and component interactions
+4. **Comprehensive**: Combined analysis with recommendations
+
+## Response Collection
+
+To add more LLM responses:
+```python
+from llm_response_processor import LLMResponseProcessor
+processor = LLMResponseProcessor("{self.analysis_dir}")
+processor.interactive_response_collector()
+```
+"""
+        
+        index_file = self.reports_dir / "README.md"
+        with open(index_file, 'w', encoding='utf-8') as f:
+            f.write(index_content)
+        
+        saved_files.append(str(index_file))
+        
+        return saved_files
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Process LLM responses and generate reports')
+    parser.add_argument('analysis_dir', help='Analysis output directory')
+    parser.add_argument('--interactive', action='store_true', help='Interactive response collection')
+    parser.add_argument('--generate-reports', action='store_true', help='Generate reports from existing responses')
+    parser.add_argument('--response-type', help='Specific response type to process')
+    
+    args = parser.parse_args()
+    
+    print("📊 LLM Response Processor")
+    print("=" * 50)
+    
+    try:
+        processor = LLMResponseProcessor(args.analysis_dir)
+        
+        if args.interactive:
+            processor.interactive_response_collector()
+        
+        if args.generate_reports:
+            print("Generating reports...")
+            reports = processor.generate_all_reports()
+            saved_files = processor.save_reports(reports)
+            
+            print(f"✅ Generated {len(saved_files)} report files:")
+            for file_path in saved_files:
+                print(f"  📄 {file_path}")
+        
+        if not args.interactive and not args.generate_reports:
+            print("Use --interactive to collect responses or --generate-reports to create reports")
+            print("Example usage:")
+            print(f"  python {__file__} {args.analysis_dir} --interactive")
+            print(f"  python {__file__} {args.analysis_dir} --generate-reports")
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        exit(1)
+
+if __name__ == "__main__":
+    main()hel
