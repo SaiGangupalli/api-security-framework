@@ -1,367 +1,670 @@
 #!/usr/bin/env python3
 """
-GitLab Repository Fetcher and Processor for Spring Boot Analysis
-Updated for clean folder structure without numbers
+Git Repository Analyzer for Java Spring Boot Projects
+Fetches code from GitLab and prepares it for Gen AI analysis
 """
 
 import os
+import git
 import json
-import subprocess
 import shutil
 from pathlib import Path
-import gitlab
-from dotenv import load_dotenv
-from tqdm import tqdm
-import chardet
-import tiktoken
+from typing import List, Dict, Any
+import argparse
+from datetime import datetime
+import logging
 
-class GitLabRepoFetcher:
-    def __init__(self, config_path="config/analysis-config.json"):
-        """Initialize the GitLab fetcher with configuration"""
-        load_dotenv("config/.env")
-        
-        self.config = self.load_config(config_path)
-        self.gitlab_url = os.getenv('GITLAB_URL')
-        self.access_token = os.getenv('GITLAB_TOKEN')
-        self.project_id = os.getenv('PROJECT_ID')
-        
-        if not all([self.gitlab_url, self.access_token, self.project_id]):
-            raise ValueError("Missing required GitLab credentials in .env file")
-        
-        # Initialize GitLab client
-        self.gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token)
-        self.project = self.gl.projects.get(self.project_id)
-        
-        # Setup clean paths
-        self.raw_repo_path = Path("source-code/raw-repository")
-        self.processed_path = Path("source-code/processed-files")
-        self.chunks_path = Path("analysis-output/code-chunks")
-        self.output_path = Path("analysis-output")
-        
-        # File extensions to analyze
-        self.java_extensions = {'.java', '.xml', '.yml', '.yaml', '.properties', '.gradle', '.md'}
-        
-        # Initialize token encoder for chunking
-        self.encoding = tiktoken.get_encoding("cl100k_base")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    def load_config(self, config_path):
-        """Load configuration from JSON file"""
-        try:
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            # Create default config
-            default_config = {
-                "max_file_size_mb": 5,
-                "chunk_size_tokens": 3000,
-                "overlap_tokens": 200,
-                "exclude_patterns": [
-                    "*.class", "*.jar", "*.war", "target/*", 
-                    ".git/*", "node_modules/*", "*.log"
-                ]
-            }
-            os.makedirs(os.path.dirname(config_path), exist_ok=True)
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=2)
-            return default_config
-
-    def clone_repository(self):
+class GitRepoAnalyzer:
+    def __init__(self, repo_url: str, output_dir: str = "analysis_output"):
+        self.repo_url = repo_url
+        self.output_dir = Path(output_dir)
+        self.repo_dir = self.output_dir / "cloned_repo"
+        self.analysis_dir = self.output_dir / "analysis"
+        
+        # File extensions to analyze for Java Spring Boot projects
+        self.java_extensions = {'.java', '.xml', '.properties', '.yml', '.yaml'}
+        self.config_files = {'pom.xml', 'build.gradle', 'application.properties', 
+                           'application.yml', 'application.yaml'}
+        
+        # Max file size for processing (1MB)
+        self.max_file_size = 1024 * 1024
+        
+    def setup_directories(self):
+        """Create necessary directories for analysis"""
+        directories = [
+            self.output_dir,
+            self.repo_dir,
+            self.analysis_dir,
+            self.analysis_dir / "java_files",
+            self.analysis_dir / "config_files",
+            self.analysis_dir / "chunks",
+            self.analysis_dir / "metadata"
+        ]
+        
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created directory: {directory}")
+    
+    def clone_repository(self, branch: str = "main"):
         """Clone the GitLab repository"""
-        print("🔄 Cloning repository...")
-        
-        # Clean existing directory
-        if self.raw_repo_path.exists():
-            shutil.rmtree(self.raw_repo_path)
-        
-        # Ensure parent directory exists
-        self.raw_repo_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Clone repository
-        clone_url = f"{self.gitlab_url}/{self.project.path_with_namespace}.git"
-        
         try:
-            subprocess.run([
-                'git', 'clone', 
-                f"https://oauth2:{self.access_token}@{clone_url.replace('https://', '')}",
-                str(self.raw_repo_path)
-            ], check=True, capture_output=True, text=True)
-            print(f"✅ Repository cloned to {self.raw_repo_path}")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error cloning repository: {e.stderr}")
-            raise
-
-    def detect_file_encoding(self, file_path):
-        """Detect file encoding"""
-        try:
-            with open(file_path, 'rb') as f:
-                raw_data = f.read()
-                result = chardet.detect(raw_data)
-                return result['encoding'] or 'utf-8'
-        except:
-            return 'utf-8'
-
-    def is_text_file(self, file_path):
-        """Check if file is a text file"""
-        try:
-            with open(file_path, 'rb') as f:
-                chunk = f.read(8192)
-                return b'\x00' not in chunk
-        except:
-            return False
-
-    def filter_relevant_files(self):
-        """Filter and process relevant Spring Boot files"""
-        print("🔍 Filtering relevant files...")
-        
-        relevant_files = []
-        
-        for root, dirs, files in os.walk(self.raw_repo_path):
-            # Skip excluded directories
-            dirs[:] = [d for d in dirs if not any(
-                d.startswith(pattern.rstrip('/*')) 
-                for pattern in self.config['exclude_patterns']
-                if '/' in pattern
-            )]
+            if self.repo_dir.exists():
+                shutil.rmtree(self.repo_dir)
+                logger.info("Removed existing repository directory")
             
-            for file in files:
-                file_path = Path(root) / file
-                
-                # Check file extension
-                if file_path.suffix not in self.java_extensions:
-                    continue
-                
-                # Check file size
-                if file_path.stat().st_size > self.config['max_file_size_mb'] * 1024 * 1024:
-                    continue
-                
-                # Check if it's a text file
-                if not self.is_text_file(file_path):
-                    continue
-                
-                relevant_files.append(file_path)
-        
-        print(f"✅ Found {len(relevant_files)} relevant files")
-        return relevant_files
-
-    def copy_and_clean_files(self, relevant_files):
-        """Copy relevant files to processed directory with cleaning"""
-        print("🧹 Cleaning and copying files...")
-        
-        # Clean processed directory
-        if self.processed_path.exists():
-            shutil.rmtree(self.processed_path)
-        self.processed_path.mkdir(parents=True)
-        
-        processed_files = []
-        
-        for file_path in tqdm(relevant_files, desc="Processing files"):
-            try:
-                # Maintain directory structure
-                relative_path = file_path.relative_to(self.raw_repo_path)
-                dest_path = self.processed_path / relative_path
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Read with proper encoding
-                encoding = self.detect_file_encoding(file_path)
-                with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-                    content = f.read()
-                
-                # Basic cleaning
-                content = content.replace('\r\n', '\n')  # Normalize line endings
-                content = '\n'.join(line.rstrip() for line in content.split('\n'))  # Remove trailing spaces
-                
-                # Write cleaned content
-                with open(dest_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                processed_files.append({
-                    'original_path': str(file_path),
-                    'processed_path': str(dest_path),
-                    'relative_path': str(relative_path),
-                    'size_bytes': len(content.encode('utf-8')),
-                    'lines': len(content.split('\n'))
-                })
-                
-            except Exception as e:
-                print(f"⚠️ Error processing {file_path}: {e}")
-        
-        return processed_files
-
-    def categorize_and_chunk_files(self, processed_files):
-        """Categorize files by type and create chunks"""
-        print("📂 Categorizing and chunking files...")
-        
-        # Create category directories
-        categories = {
-            'controllers': self.chunks_path / 'controllers',
-            'services': self.chunks_path / 'services', 
-            'repositories': self.chunks_path / 'repositories',
-            'entities': self.chunks_path / 'entities',
-            'configurations': self.chunks_path / 'configurations',
-            'other': self.chunks_path / 'other'
+            logger.info(f"Cloning repository: {self.repo_url}")
+            git.Repo.clone_from(self.repo_url, self.repo_dir, branch=branch)
+            logger.info("Repository cloned successfully")
+            
+        except git.exc.GitCommandError as e:
+            logger.error(f"Git clone failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during cloning: {e}")
+            raise
+    
+    def scan_repository(self) -> Dict[str, List[Path]]:
+        """Scan repository and categorize files"""
+        file_categories = {
+            'java_files': [],
+            'config_files': [],
+            'test_files': [],
+            'resource_files': [],
+            'other_files': []
         }
         
-        for category_path in categories.values():
-            category_path.mkdir(parents=True, exist_ok=True)
+        logger.info("Scanning repository for relevant files...")
         
-        chunk_metadata = []
+        for file_path in self.repo_dir.rglob('*'):
+            if file_path.is_file() and file_path.stat().st_size <= self.max_file_size:
+                relative_path = file_path.relative_to(self.repo_dir)
+                
+                # Skip hidden files and directories
+                if any(part.startswith('.') for part in relative_path.parts):
+                    continue
+                
+                # Skip build directories
+                if any(part in ['target', 'build', 'node_modules'] for part in relative_path.parts):
+                    continue
+                
+                # Categorize files
+                if file_path.suffix == '.java':
+                    if 'test' in str(file_path).lower():
+                        file_categories['test_files'].append(file_path)
+                    else:
+                        file_categories['java_files'].append(file_path)
+                elif file_path.name in self.config_files or file_path.suffix in {'.xml', '.properties', '.yml', '.yaml'}:
+                    file_categories['config_files'].append(file_path)
+                elif file_path.suffix in {'.sql', '.json', '.txt', '.md'}:
+                    file_categories['resource_files'].append(file_path)
+                else:
+                    file_categories['other_files'].append(file_path)
         
-        for file_info in tqdm(processed_files, desc="Categorizing and chunking"):
-            try:
-                # Determine category based on file path and content
-                category = self.determine_file_category(file_info)
-                
-                with open(file_info['processed_path'], 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                chunks = self.chunk_content(content)
-                
-                for i, chunk in enumerate(chunks):
-                    safe_filename = Path(file_info['relative_path']).stem.replace(' ', '_')
-                    chunk_filename = f"{safe_filename}_chunk_{i+1:03d}.txt"
-                    chunk_path = categories[category] / chunk_filename
-                    
-                    with open(chunk_path, 'w', encoding='utf-8') as f:
-                        f.write(f"# File: {file_info['relative_path']}\n")
-                        f.write(f"# Category: {category}\n")
-                        f.write(f"# Chunk: {i+1}/{len(chunks)}\n")
-                        f.write("# " + "="*60 + "\n\n")
-                        f.write(chunk)
-                    
-                    chunk_metadata.append({
-                        'original_file': file_info['relative_path'],
-                        'category': category,
-                        'chunk_file': str(chunk_path),
-                        'chunk_number': i + 1,
-                        'total_chunks': len(chunks),
-                        'tokens': len(self.encoding.encode(chunk))
-                    })
+        # Log statistics
+        for category, files in file_categories.items():
+            logger.info(f"Found {len(files)} {category}")
+        
+        return file_categories
+    
+    def extract_file_content(self, file_path: Path) -> Dict[str, Any]:
+        """Extract content and metadata from a file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
             
-            except Exception as e:
-                print(f"⚠️ Error chunking {file_info['relative_path']}: {e}")
-        
-        # Save chunk metadata
-        with open(self.chunks_path / 'chunk_metadata.json', 'w') as f:
-            json.dump(chunk_metadata, f, indent=2)
-        
-        return chunk_metadata
-
-    def determine_file_category(self, file_info):
-        """Determine file category based on path and naming conventions"""
-        file_path = file_info['relative_path'].lower()
-        
-        if any(keyword in file_path for keyword in ['controller', 'rest', 'endpoint']):
-            return 'controllers'
-        elif any(keyword in file_path for keyword in ['service', 'business']):
-            return 'services'
-        elif any(keyword in file_path for keyword in ['repository', 'dao', 'data']):
-            return 'repositories'
-        elif any(keyword in file_path for keyword in ['entity', 'model', 'domain']):
-            return 'entities'
-        elif any(keyword in file_path for keyword in ['config', 'configuration', 'application']):
-            return 'configurations'
-        else:
-            return 'other'
-
-    def chunk_content(self, content, max_tokens=None):
-        """Split content into chunks for AI processing"""
-        if max_tokens is None:
-            max_tokens = self.config['chunk_size_tokens']
-        
-        tokens = self.encoding.encode(content)
-        
-        if len(tokens) <= max_tokens:
+            relative_path = file_path.relative_to(self.repo_dir)
+            
+            return {
+                'file_path': str(relative_path),
+                'full_path': str(file_path),
+                'content': content,
+                'size': len(content),
+                'lines': len(content.splitlines()),
+                'extension': file_path.suffix,
+                'is_test': 'test' in str(file_path).lower(),
+                'timestamp': datetime.now().isoformat()
+            }
+        except Exception as e:
+            logger.warning(f"Could not read file {file_path}: {e}")
+            return None
+    
+    def chunk_content(self, content: str, chunk_size: int = 4000, overlap: int = 200) -> List[str]:
+        """Split content into overlapping chunks for Gen AI processing"""
+        if len(content) <= chunk_size:
             return [content]
         
         chunks = []
-        overlap = self.config['overlap_tokens']
-        
         start = 0
-        while start < len(tokens):
-            end = min(start + max_tokens, len(tokens))
-            chunk_tokens = tokens[start:end]
-            chunk_text = self.encoding.decode(chunk_tokens)
-            chunks.append(chunk_text)
+        
+        while start < len(content):
+            end = start + chunk_size
             
-            if end >= len(tokens):
+            # Try to break at natural boundaries (line breaks)
+            if end < len(content):
+                # Look for the last newline before the end
+                last_newline = content.rfind('\n', start, end)
+                if last_newline != -1 and last_newline > start:
+                    end = last_newline + 1
+            
+            chunks.append(content[start:end])
+            
+            if end >= len(content):
                 break
-            
+                
             start = end - overlap
         
         return chunks
-
-    def generate_analysis_summary(self, processed_files, chunk_metadata):
-        """Generate summary of the analysis"""
-        # Ensure output directory exists
-        self.output_path.mkdir(parents=True, exist_ok=True)
+    
+    def analyze_java_structure(self, file_content: Dict[str, Any]) -> Dict[str, Any]:
+        """Basic analysis of Java file structure"""
+        content = file_content['content']
         
-        # Count categories
-        category_counts = {}
-        for chunk in chunk_metadata:
-            category = chunk['category']
-            category_counts[category] = category_counts.get(category, 0) + 1
-        
-        summary = {
-            'repository_info': {
-                'name': self.project.name,
-                'description': self.project.description,
-                'url': self.project.web_url,
-                'last_activity': self.project.last_activity_at
-            },
-            'processing_summary': {
-                'total_files_processed': len(processed_files),
-                'total_chunks_created': len(chunk_metadata),
-                'category_distribution': category_counts,
-                'file_types': {}
-            },
-            'files': processed_files,
-            'chunks': chunk_metadata
+        # Extract basic Java elements
+        analysis = {
+            'package': None,
+            'imports': [],
+            'classes': [],
+            'interfaces': [],
+            'annotations': [],
+            'methods': [],
+            'spring_annotations': []
         }
         
-        # Count file types
-        for file_info in processed_files:
-            ext = Path(file_info['relative_path']).suffix
-            summary['processing_summary']['file_types'][ext] = \
-                summary['processing_summary']['file_types'].get(ext, 0) + 1
+        lines = content.splitlines()
         
-        # Save summary
-        with open(self.output_path / 'processing-summary.json', 'w') as f:
-            json.dump(summary, f, indent=2)
+        for line in lines:
+            line = line.strip()
+            
+            # Package declaration
+            if line.startswith('package '):
+                analysis['package'] = line.replace('package ', '').replace(';', '').strip()
+            
+            # Imports
+            elif line.startswith('import '):
+                import_stmt = line.replace('import ', '').replace(';', '').strip()
+                analysis['imports'].append(import_stmt)
+            
+            # Class declarations
+            elif 'class ' in line and ('public' in line or 'private' in line or 'protected' in line):
+                analysis['classes'].append(line)
+            
+            # Interface declarations
+            elif 'interface ' in line:
+                analysis['interfaces'].append(line)
+            
+            # Spring annotations
+            elif line.startswith('@') and any(spring_ann in line for spring_ann in 
+                ['Controller', 'Service', 'Repository', 'Component', 'RestController', 
+                 'Autowired', 'RequestMapping', 'GetMapping', 'PostMapping']):
+                analysis['spring_annotations'].append(line)
+            
+            # General annotations
+            elif line.startswith('@'):
+                analysis['annotations'].append(line)
         
+        return analysis
+    
+    def process_files(self, file_categories: Dict[str, List[Path]]):
+        """Process all files and create analysis outputs"""
+        logger.info("Processing files for analysis...")
+        
+        all_files_data = []
+        
+        for category, files in file_categories.items():
+            category_data = []
+            
+            for file_path in files:
+                file_content = self.extract_file_content(file_path)
+                if file_content is None:
+                    continue
+                
+                # Add Java-specific analysis for Java files
+                if file_path.suffix == '.java':
+                    file_content['java_analysis'] = self.analyze_java_structure(file_content)
+                
+                # Create chunks for large files
+                if file_content['size'] > 2000:
+                    chunks = self.chunk_content(file_content['content'])
+                    file_content['chunks'] = chunks
+                    file_content['chunk_count'] = len(chunks)
+                
+                category_data.append(file_content)
+                all_files_data.append(file_content)
+            
+            # Save category-specific data
+            if category_data:
+                output_file = self.analysis_dir / f"{category}.json"
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(category_data, f, indent=2, ensure_ascii=False)
+                logger.info(f"Saved {len(category_data)} files to {output_file}")
+        
+        # Save combined analysis
+        combined_file = self.analysis_dir / "combined_analysis.json"
+        with open(combined_file, 'w', encoding='utf-8') as f:
+            json.dump(all_files_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Saved combined analysis with {len(all_files_data)} files")
+        
+        return all_files_data
+    
+    def create_summary_report(self, all_files_data: List[Dict[str, Any]]):
+        """Create a summary report of the analysis"""
+        summary = {
+            'analysis_timestamp': datetime.now().isoformat(),
+            'repository_url': self.repo_url,
+            'total_files_analyzed': len(all_files_data),
+            'file_statistics': {},
+            'spring_boot_features': {
+                'controllers': 0,
+                'services': 0,
+                'repositories': 0,
+                'components': 0,
+                'configuration_files': 0
+            },
+            'packages': set(),
+            'dependencies': set()
+        }
+        
+        # Gather statistics
+        for file_data in all_files_data:
+            extension = file_data.get('extension', 'unknown')
+            summary['file_statistics'][extension] = summary['file_statistics'].get(extension, 0) + 1
+            
+            # Analyze Java files for Spring Boot features
+            if 'java_analysis' in file_data:
+                java_analysis = file_data['java_analysis']
+                
+                if java_analysis['package']:
+                    summary['packages'].add(java_analysis['package'])
+                
+                for annotation in java_analysis['spring_annotations']:
+                    if 'Controller' in annotation:
+                        summary['spring_boot_features']['controllers'] += 1
+                    elif 'Service' in annotation:
+                        summary['spring_boot_features']['services'] += 1
+                    elif 'Repository' in annotation:
+                        summary['spring_boot_features']['repositories'] += 1
+                    elif 'Component' in annotation:
+                        summary['spring_boot_features']['components'] += 1
+                
+                for import_stmt in java_analysis['imports']:
+                    if 'springframework' in import_stmt:
+                        summary['dependencies'].add(import_stmt)
+        
+        # Convert sets to lists for JSON serialization
+        summary['packages'] = list(summary['packages'])
+        summary['dependencies'] = list(summary['dependencies'])
+        
+        # Save summary report
+        summary_file = self.analysis_dir / "summary_report.json"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Summary report saved to {summary_file}")
         return summary
-
-    def run_full_process(self):
-        """Run the complete fetching and processing pipeline"""
-        print("🚀 Starting GitLab repository analysis...")
-        
+    
+    def run_analysis(self, repo_branch: str = "main"):
+        """Run the complete analysis pipeline"""
         try:
-            # Step 1: Clone repository
-            self.clone_repository()
+            logger.info("Starting Git repository analysis...")
             
-            # Step 2: Filter relevant files
-            relevant_files = self.filter_relevant_files()
+            # Setup
+            self.setup_directories()
             
-            # Step 3: Copy and clean files
-            processed_files = self.copy_and_clean_files(relevant_files)
+            # Clone repository
+            self.clone_repository(repo_branch)
             
-            # Step 4: Categorize and create chunks
-            chunk_metadata = self.categorize_and_chunk_files(processed_files)
+            # Scan and categorize files
+            file_categories = self.scan_repository()
             
-            # Step 5: Generate summary
-            summary = self.generate_analysis_summary(processed_files, chunk_metadata)
+            # Process files
+            all_files_data = self.process_files(file_categories)
             
-            print("✅ Repository processing completed successfully!")
-            print(f"📊 Processed {len(processed_files)} files")
-            print(f"📦 Created {len(chunk_metadata)} chunks")
-            print(f"📁 Output saved to analysis-output/")
+            # Create summary
+            summary = self.create_summary_report(all_files_data)
             
-            return summary
+            logger.info("Analysis completed successfully!")
+            logger.info(f"Results saved in: {self.analysis_dir}")
+            logger.info(f"Total files analyzed: {len(all_files_data)}")
+            
+            return {
+                'success': True,
+                'output_directory': str(self.analysis_dir),
+                'files_processed': len(all_files_data),
+                'summary': summary
+            }
             
         except Exception as e:
-            print(f"❌ Error during processing: {e}")
-            raise
+            logger.error(f"Analysis failed: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+def main():
+    parser = argparse.ArgumentParser(description='Analyze Git repository for Gen AI processing')
+    parser.add_argument('repo_url', help='GitLab repository URL')
+    parser.add_argument('--branch', default='main', help='Git branch to analyze (default: main)')
+    parser.add_argument('--output', default='analysis_output', help='Output directory (default: analysis_output)')
+    
+    args = parser.parse_args()
+    
+    analyzer = GitRepoAnalyzer(args.repo_url, args.output)
+    result = analyzer.run_analysis(args.branch)
+    
+    if result['success']:
+        print(f"\n✅ Analysis completed successfully!")
+        print(f"📁 Output directory: {result['output_directory']}")
+        print(f"📊 Files processed: {result['files_processed']}")
+    else:
+        print(f"\n❌ Analysis failed: {result['error']}")
+        exit(1)
 
 if __name__ == "__main__":
-    # Example usage
-    fetcher = GitLabRepoFetcher()
-    summary = fetcher.run_full_process()
+    main()
+
+
+
+
+
+
+
+
+
+# Git Repository Analysis Project Structure
+
+## Recommended Folder Structure
+
+```
+git-repo-analyzer/
+├── README.md
+├── requirements.txt
+├── config/
+│   ├── analysis_config.json
+│   └── file_patterns.json
+├── src/
+│   ├── __init__.py
+│   ├── git_analyzer.py          # Main analysis script
+│   ├── file_processor.py        # File processing utilities
+│   ├── chunking_strategies.py   # Content chunking for Gen AI
+│   └── utils/
+│       ├── __init__.py
+│       ├── file_utils.py
+│       └── logging_config.py
+├── analysis_output/             # Generated during analysis
+│   ├── cloned_repo/            # Cloned repository
+│   └── analysis/               # Analysis results
+│       ├── java_files.json
+│       ├── config_files.json
+│       ├── test_files.json
+│       ├── chunks/
+│       ├── metadata/
+│       └── summary_report.json
+├── scripts/
+│   ├── run_analysis.py         # Entry point script
+│   └── batch_analysis.py       # For multiple repositories
+└── tests/
+    ├── __init__.py
+    ├── test_analyzer.py
+    └── sample_data/
+```
+
+## Installation and Setup
+
+### 1. Create Virtual Environment
+
+```bash
+# Create project directory
+mkdir git-repo-analyzer
+cd git-repo-analyzer
+
+# Create virtual environment
+python -m venv venv
+
+# Activate virtual environment
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+source venv/bin/activate
+```
+
+### 2. Install Dependencies
+
+Create `requirements.txt`:
+
+```txt
+GitPython==3.1.40
+requests==2.31.0
+python-dotenv==1.0.0
+tiktoken==0.5.2
+beautifulsoup4==4.12.2
+langchain==0.1.0
+langchain-community==0.0.10
+python-magic==0.4.27
+chardet==5.2.0
+pathspec==0.12.1
+```
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Configuration Files
+
+#### `config/analysis_config.json`
+```json
+{
+  "chunk_settings": {
+    "default_chunk_size": 4000,
+    "overlap_size": 200,
+    "min_chunk_size": 100
+  },
+  "file_settings": {
+    "max_file_size_mb": 1,
+    "excluded_directories": [
+      "target",
+      "build",
+      "node_modules",
+      ".git",
+      ".idea",
+      ".vscode"
+    ],
+    "included_extensions": [
+      ".java",
+      ".xml",
+      ".properties",
+      ".yml",
+      ".yaml",
+      ".sql",
+      ".json"
+    ]
+  },
+  "spring_boot_patterns": {
+    "controller_annotations": [
+      "@Controller",
+      "@RestController"
+    ],
+    "service_annotations": [
+      "@Service",
+      "@Component"
+    ],
+    "repository_annotations": [
+      "@Repository"
+    ],
+    "configuration_files": [
+      "application.properties",
+      "application.yml",
+      "application.yaml",
+      "pom.xml",
+      "build.gradle"
+    ]
+  },
+  "gen_ai_settings": {
+    "context_window_size": 8000,
+    "preserve_code_structure": true,
+    "include_comments": true,
+    "extract_documentation": true
+  }
+}
+```
+
+#### `config/file_patterns.json`
+```json
+{
+  "java_patterns": {
+    "class_pattern": "^\\s*(public|private|protected)?\\s*class\\s+\\w+",
+    "interface_pattern": "^\\s*(public|private|protected)?\\s*interface\\s+\\w+",
+    "method_pattern": "^\\s*(public|private|protected)\\s+.*\\s+\\w+\\s*\\(",
+    "annotation_pattern": "^\\s*@\\w+"
+  },
+  "spring_patterns": {
+    "rest_endpoint": "@(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping)",
+    "dependency_injection": "@(Autowired|Inject|Resource)",
+    "configuration": "@(Configuration|EnableAutoConfiguration|ComponentScan)"
+  }
+}
+```
+
+## Usage Examples
+
+### Basic Usage
+
+```bash
+# Clone and analyze a repository
+python git_analyzer.py https://gitlab.com/your-org/your-spring-boot-repo.git
+
+# Specify branch and output directory
+python git_analyzer.py https://gitlab.com/your-org/repo.git --branch develop --output my_analysis
+```
+
+### Advanced Usage with Configuration
+
+```python
+from git_analyzer import GitRepoAnalyzer
+
+# Initialize analyzer with custom settings
+analyzer = GitRepoAnalyzer(
+    repo_url="https://gitlab.com/your-org/your-repo.git",
+    output_dir="analysis_results"
+)
+
+# Run analysis
+result = analyzer.run_analysis(repo_branch="main")
+
+if result['success']:
+    print(f"Analysis completed: {result['files_processed']} files processed")
+    print(f"Results saved to: {result['output_directory']}")
+else:
+    print(f"Analysis failed: {result['error']}")
+```
+
+## Key Features
+
+### 1. **Repository Cloning**
+- Clones GitLab repositories
+- Supports different branches
+- Handles authentication (configure Git credentials)
+
+### 2. **File Categorization**
+- Java source files
+- Configuration files (XML, Properties, YAML)
+- Test files
+- Resource files
+
+### 3. **Content Chunking**
+- Splits large files for Gen AI processing
+- Configurable chunk sizes with overlap
+- Preserves code structure boundaries
+
+### 4. **Spring Boot Analysis**
+- Identifies Spring annotations
+- Extracts REST endpoints
+- Analyzes dependency injection patterns
+- Configuration file parsing
+
+### 5. **Gen AI Preparation**
+- JSON output format
+- Metadata extraction
+- Context preservation
+- Structured data for LLM consumption
+
+## Output Files
+
+### `java_files.json`
+Contains all Java source files with:
+- File content and metadata
+- Package and import analysis
+- Spring annotations detection
+- Method and class extraction
+
+### `config_files.json`
+Configuration files including:
+- application.properties/yml
+- pom.xml or build.gradle
+- Other configuration files
+
+### `summary_report.json`
+High-level analysis including:
+- File statistics
+- Spring Boot component counts
+- Package structure
+- Dependency analysis
+
+## Authentication for Private Repositories
+
+### Using Git Credentials
+```bash
+# Set up Git credentials
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+
+# For GitLab, use personal access token
+git config --global credential.helper store
+```
+
+### Using Environment Variables
+Create a `.env` file:
+```bash
+GITLAB_TOKEN=your_personal_access_token
+GITLAB_USERNAME=your_username
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Repository Access Denied**
+   - Ensure you have proper GitLab access tokens
+   - Check repository URL format
+
+2. **Large File Processing**
+   - Adjust `max_file_size` in configuration
+   - Files larger than 1MB are skipped by default
+
+3. **Memory Issues**
+   - Reduce chunk sizes for large repositories
+   - Process files in batches
+
+### Logging
+
+The script provides detailed logging. To increase verbosity:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## Next Steps for Gen AI Integration
+
+After running the analysis, you can:
+
+1. **Feed to LLM**: Use the JSON outputs directly with your Gen AI model
+2. **Vector Database**: Index the chunks for similarity search
+3. **Code Understanding**: Use the structured data for code comprehension tasks
+4. **Documentation**: Generate documentation from the analyzed code
+5. **Code Review**: Identify patterns and potential improvements
