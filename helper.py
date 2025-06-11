@@ -48,14 +48,27 @@ class GitRepoAnalyzer:
             self.repo_dir,
             self.analysis_dir,
             self.analysis_dir / "java_files",
-            self.analysis_dir / "config_files",
+            self.analysis_dir / "config_files", 
             self.analysis_dir / "chunks",
-            self.analysis_dir / "metadata"
+            self.analysis_dir / "metadata",
+            self.analysis_dir / "test_files",
+            self.analysis_dir / "resource_files"
         ]
         
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
             logger.info(f"Created directory: {directory}")
+        
+        # Create placeholder files to ensure directories are visible
+        placeholder_files = [
+            self.analysis_dir / "java_files" / ".gitkeep",
+            self.analysis_dir / "config_files" / ".gitkeep",
+            self.analysis_dir / "chunks" / ".gitkeep",
+            self.analysis_dir / "metadata" / ".gitkeep"
+        ]
+        
+        for placeholder in placeholder_files:
+            placeholder.write_text("# Placeholder file to maintain directory structure\n")
     
     def clone_repository(self, branch: str = "main"):
         """Clone the GitLab repository with detailed error reporting"""
@@ -291,28 +304,39 @@ class GitRepoAnalyzer:
         return analysis
     
     def process_files(self, file_categories: Dict[str, List[Path]]):
-        """Process files in batches with memory optimization"""
+        """Process files in batches with memory optimization and proper file creation"""
         logger.info("Processing files for analysis with memory optimization...")
+        
+        all_categories_summary = []
         
         # Process each category separately to manage memory
         for category, files in file_categories.items():
             if not files:
+                logger.info(f"No files found for category: {category}")
+                # Create empty file for the category
+                empty_file = self.analysis_dir / f"{category}.json"
+                with open(empty_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f, indent=2)
+                logger.info(f"Created empty file: {empty_file}")
                 continue
                 
             logger.info(f"Processing {len(files)} {category}...")
             
             # Process files in batches
             category_file_path = self.analysis_dir / f"{category}.json"
+            chunks_dir = self.analysis_dir / "chunks" / category
+            chunks_dir.mkdir(exist_ok=True)
             
-            # Initialize the JSON file
-            with open(category_file_path, 'w', encoding='utf-8') as f:
-                f.write('[')  # Start JSON array
-            
+            # Initialize the JSON file with proper array structure
+            all_category_data = []
             processed_count = 0
+            chunk_file_count = 0
             
             for i in range(0, len(files), self.batch_size):
                 batch = files[i:i + self.batch_size]
-                logger.info(f"Processing batch {i//self.batch_size + 1}/{(len(files) + self.batch_size - 1)//self.batch_size}")
+                batch_num = i//self.batch_size + 1
+                total_batches = (len(files) + self.batch_size - 1)//self.batch_size
+                logger.info(f"Processing {category} batch {batch_num}/{total_batches} ({len(batch)} files)")
                 
                 batch_data = []
                 
@@ -326,13 +350,28 @@ class GitRepoAnalyzer:
                         if file_path.suffix == '.java':
                             file_content['java_analysis'] = self.analyze_java_structure(file_content)
                         
-                        # Create chunks for larger files (but smaller threshold)
-                        if file_content['size'] > 1000:  # Reduced from 2000
+                        # Handle chunking and save chunks separately
+                        if file_content['size'] > 1000:  # Threshold for chunking
                             chunks = self.chunk_content(file_content['content'])
-                            file_content['chunks'] = chunks
                             file_content['chunk_count'] = len(chunks)
-                            # Remove original content to save memory
-                            del file_content['content']
+                            
+                            # Save chunks to separate files
+                            if chunks:
+                                chunk_file_count += 1
+                                chunk_file = chunks_dir / f"file_{chunk_file_count:04d}_chunks.json"
+                                chunk_data = {
+                                    'source_file': file_content['file_path'],
+                                    'chunk_count': len(chunks),
+                                    'chunks': chunks
+                                }
+                                with open(chunk_file, 'w', encoding='utf-8') as f:
+                                    json.dump(chunk_data, f, indent=2, ensure_ascii=False)
+                                
+                                # Reference chunk file instead of storing content
+                                file_content['chunks_file'] = str(chunk_file.relative_to(self.analysis_dir))
+                                del file_content['content']  # Remove large content
+                            else:
+                                file_content['chunks'] = []
                         
                         batch_data.append(file_content)
                         processed_count += 1
@@ -344,14 +383,8 @@ class GitRepoAnalyzer:
                         logger.warning(f"Error processing {file_path}: {e}")
                         continue
                 
-                # Append batch to JSON file
-                if batch_data:
-                    with open(category_file_path, 'a', encoding='utf-8') as f:
-                        if processed_count > len(batch_data):  # Not the first batch
-                            f.write(',')
-                        json.dump(batch_data, f, indent=2, ensure_ascii=False)
-                        if i + self.batch_size < len(files):  # Not the last batch
-                            f.write(',')
+                # Add batch data to category collection
+                all_category_data.extend(batch_data)
                 
                 # Clear batch data from memory
                 del batch_data
@@ -359,50 +392,57 @@ class GitRepoAnalyzer:
                 # Force garbage collection
                 import gc
                 gc.collect()
+                
+                # Log progress
+                if processed_count > 0 and processed_count % 50 == 0:
+                    logger.info(f"  Processed {processed_count}/{len(files)} files in {category}")
             
-            # Close JSON array
-            with open(category_file_path, 'a', encoding='utf-8') as f:
-                f.write(']')
+            # Save complete category data
+            with open(category_file_path, 'w', encoding='utf-8') as f:
+                json.dump(all_category_data, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"Saved {processed_count} files to {category_file_path}")
+            logger.info(f"✅ Saved {processed_count} files to {category_file_path}")
+            logger.info(f"✅ Created {chunk_file_count} chunk files in {chunks_dir}")
+            
+            # Add to summary
+            all_categories_summary.append({
+                'category': category,
+                'file_count': processed_count,
+                'chunk_files': chunk_file_count,
+                'output_file': str(category_file_path.relative_to(self.analysis_dir))
+            })
+            
+            # Clear category data from memory
+            del all_category_data
+            import gc
+            gc.collect()
         
-        # Create a lightweight summary instead of loading all data
-        return self.create_lightweight_summary()
+        # Create combined summary (lightweight)
+        self.create_combined_summary(all_categories_summary)
+        
+        return all_categories_summary
     
-    def create_lightweight_summary(self):
-        """Create summary without loading all files into memory"""
-        logger.info("Creating lightweight summary...")
+    def create_combined_summary(self, categories_summary: List[Dict[str, Any]]):
+        """Create a combined summary file"""
+        combined_summary = {
+            'analysis_timestamp': datetime.now().isoformat(),
+            'repository_url': self.repo_url,
+            'categories': categories_summary,
+            'total_files': sum(cat['file_count'] for cat in categories_summary),
+            'total_chunk_files': sum(cat['chunk_files'] for cat in categories_summary),
+            'output_structure': {
+                'main_files': [cat['output_file'] for cat in categories_summary],
+                'chunk_directories': ['chunks/' + cat['category'] for cat in categories_summary if cat['chunk_files'] > 0],
+                'metadata_files': ['summary_report.json', 'combined_summary.json']
+            }
+        }
         
-        summary_data = []
-        total_files = 0
+        combined_file = self.analysis_dir / "combined_summary.json"
+        with open(combined_file, 'w', encoding='utf-8') as f:
+            json.dump(combined_summary, f, indent=2, ensure_ascii=False)
         
-        # Process each category file
-        for json_file in self.analysis_dir.glob("*.json"):
-            if json_file.name == "summary_report.json":
-                continue
-                
-            category = json_file.stem
-            file_count = 0
-            
-            try:
-                # Count files without loading entire JSON
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    # Simple count by counting file_path occurrences
-                    file_count = content.count('"file_path":')
-                
-                total_files += file_count
-                summary_data.append({
-                    'category': category,
-                    'file_count': file_count,
-                    'file_size': json_file.stat().st_size
-                })
-                
-            except Exception as e:
-                logger.warning(f"Could not process {json_file}: {e}")
-        
-        logger.info(f"Lightweight summary: {total_files} files across {len(summary_data)} categories")
-        return summary_data
+        logger.info(f"✅ Created combined summary: {combined_file}")
+        return combined_summary
     
     def create_summary_report(self, summary_data: List[Dict[str, Any]]):
         """Create a memory-efficient summary report"""
@@ -416,28 +456,62 @@ class GitRepoAnalyzer:
                 'max_file_size_mb': self.max_file_size / (1024 * 1024),
                 'batch_size': self.batch_size,
                 'max_chunk_size': self.max_chunk_size
-            }
+            },
+            'output_files': {}
         }
+        
+        # Document all output files that were created
+        for category_info in summary_data:
+            category = category_info['category']
+            main_file = self.analysis_dir / f"{category}.json"
+            chunks_dir = self.analysis_dir / "chunks" / category
+            
+            summary['output_files'][category] = {
+                'main_file': f"{category}.json",
+                'file_count': category_info['file_count'],
+                'chunk_files': category_info['chunk_files'],
+                'chunks_directory': f"chunks/{category}" if category_info['chunk_files'] > 0 else None,
+                'exists': main_file.exists()
+            }
         
         # Add basic statistics from existing JSON files
         try:
             # Read a sample of java files to get Spring Boot info
             java_file = self.analysis_dir / "java_files.json"
-            if java_file.exists():
-                spring_features = {'controllers': 0, 'services': 0, 'repositories': 0}
+            if java_file.exists() and java_file.stat().st_size > 0:
+                spring_features = {'controllers': 0, 'services': 0, 'repositories': 0, 'components': 0}
                 packages = set()
                 
-                # Parse in chunks to avoid memory issues
-                with open(java_file, 'r', encoding='utf-8') as f:
-                    # Read first 100KB to get a sample
-                    sample_content = f.read(100 * 1024)
+                # Parse safely to avoid memory issues
+                try:
+                    with open(java_file, 'r', encoding='utf-8') as f:
+                        java_data = json.load(f)
+                        
+                    for file_info in java_data[:50]:  # Sample first 50 files
+                        if 'java_analysis' in file_info:
+                            java_analysis = file_info['java_analysis']
+                            
+                            if java_analysis.get('package'):
+                                packages.add(java_analysis['package'])
+                            
+                            for annotation in java_analysis.get('spring_annotations', []):
+                                if 'Controller' in annotation:
+                                    spring_features['controllers'] += 1
+                                elif 'Service' in annotation:
+                                    spring_features['services'] += 1
+                                elif 'Repository' in annotation:
+                                    spring_features['repositories'] += 1
+                                elif 'Component' in annotation:
+                                    spring_features['components'] += 1
                     
-                    # Count Spring annotations in sample
-                    spring_features['controllers'] = sample_content.count('@Controller') + sample_content.count('@RestController')
-                    spring_features['services'] = sample_content.count('@Service')
-                    spring_features['repositories'] = sample_content.count('@Repository')
-                
-                summary['spring_boot_features'] = spring_features
+                    summary['spring_boot_features'] = spring_features
+                    summary['sample_packages'] = list(packages)[:20]  # Limit to 20 packages
+                    
+                except (json.JSONDecodeError, MemoryError) as e:
+                    logger.warning(f"Could not parse java_files.json for Spring analysis: {e}")
+                    summary['spring_boot_features'] = {'note': 'Analysis failed due to file size/format'}
+            else:
+                summary['spring_boot_features'] = {'note': 'No Java files found'}
         
         except Exception as e:
             logger.warning(f"Could not analyze Spring Boot features: {e}")
@@ -448,7 +522,30 @@ class GitRepoAnalyzer:
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"Memory-optimized summary report saved to {summary_file}")
+        logger.info(f"✅ Memory-optimized summary report saved to {summary_file}")
+        
+        # Also create a simple file listing for easy reference
+        file_listing = self.analysis_dir / "file_listing.txt"
+        with open(file_listing, 'w', encoding='utf-8') as f:
+            f.write("Git Repository Analysis - Generated Files\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Main Analysis Files:\n")
+            for category_info in summary_data:
+                category = category_info['category']
+                f.write(f"  📄 {category}.json ({category_info['file_count']} files)\n")
+                if category_info['chunk_files'] > 0:
+                    f.write(f"     └── chunks/{category}/ ({category_info['chunk_files']} chunk files)\n")
+            
+            f.write(f"\nSummary Files:\n")
+            f.write(f"  📊 summary_report.json\n")
+            f.write(f"  📋 combined_summary.json\n")
+            f.write(f"  📝 file_listing.txt\n")
+            
+            f.write(f"\nTotal Files Analyzed: {summary['total_files_analyzed']}\n")
+            f.write(f"Analysis Date: {summary['analysis_timestamp']}\n")
+        
+        logger.info(f"✅ Created file listing: {file_listing}")
         return summary
     
     def run_analysis(self, repo_branch: str = "main"):
