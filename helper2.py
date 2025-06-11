@@ -20,36 +20,67 @@ logger = logging.getLogger(__name__)
 class LLMAnalysisEngine:
     """Engine to prepare and feed repository analysis to LLMs"""
     
-    def __init__(self, analysis_dir: str, model_name: str = "gpt-4"):
+    def __init__(self, analysis_dir: str, model_name: str = "gemini-2.0-flash"):
         self.analysis_dir = Path(analysis_dir)
         self.model_name = model_name
         
         # Token counting for different models
         try:
-            self.encoding = tiktoken.encoding_for_model(model_name)
+            if "gemini" in model_name.lower():
+                # For Gemini models, use approximate token counting
+                self.encoding = None  # Gemini doesn't use tiktoken
+            else:
+                self.encoding = tiktoken.encoding_for_model(model_name)
         except:
-            self.encoding = tiktoken.get_encoding("cl100k_base")  # Default for GPT-4
+            self.encoding = tiktoken.get_encoding("cl100k_base")  # Default fallback
         
-        # Context limits for different models
+        # Context limits for different models (updated for Gemini 2.0)
         self.context_limits = {
             "gpt-4": 8192,
             "gpt-4-32k": 32768,
+            "gpt-4-turbo": 128000,
             "gpt-3.5-turbo": 4096,
             "gpt-3.5-turbo-16k": 16384,
             "claude-3": 200000,
-            "claude-3.5": 200000
+            "claude-3.5": 200000,
+            "claude-3-opus": 200000,
+            "claude-3-sonnet": 200000,
+            "claude-3-haiku": 200000,
+            "gemini-pro": 1000000,
+            "gemini-1.5-pro": 2000000,
+            "gemini-2.0-flash": 1000000,  # Gemini 2.0 Flash context limit
+            "gemini-2.0-flash-001": 1000000,
+            "gemini-flash": 1000000,
+            "gemini-flash-001": 1000000
         }
         
-        self.max_tokens = self.context_limits.get(model_name, 8192)
-        logger.info(f"Initialized LLM Analysis Engine for {model_name} (max tokens: {self.max_tokens})")
+        self.max_tokens = self.context_limits.get(model_name, self.context_limits.get("gemini-2.0-flash", 1000000))
+        
+        # Gemini-specific optimizations
+        self.is_gemini = "gemini" in model_name.lower()
+        if self.is_gemini:
+            self.max_tokens = min(self.max_tokens, 800000)  # Leave buffer for response
+        
+        logger.info(f"Initialized LLM Analysis Engine for {model_name} (max tokens: {self.max_tokens:,})")
+        if self.is_gemini:
+            logger.info("🤖 Gemini model detected - using optimized prompts and token counting")
     
     def count_tokens(self, text: str) -> int:
-        """Count tokens in text"""
+        """Count tokens in text with Gemini-optimized counting"""
         try:
-            return len(self.encoding.encode(text))
+            if self.is_gemini:
+                # Gemini token counting approximation
+                # Gemini generally has more efficient tokenization than GPT models
+                # Approximate: 1 token ≈ 3-4 characters for English text
+                return len(text) // 3
+            else:
+                return len(self.encoding.encode(text))
         except:
-            # Fallback estimation: ~4 chars per token
-            return len(text) // 4
+            # Fallback estimation
+            if self.is_gemini:
+                return len(text) // 3
+            else:
+                return len(text) // 4
     
     def load_analysis_summary(self) -> Dict[str, Any]:
         """Load the main analysis summary"""
@@ -94,10 +125,23 @@ class LLMAnalysisEngine:
         return category_data
     
     def create_project_overview_prompt(self) -> str:
-        """Create a comprehensive project overview prompt"""
+        """Create a comprehensive project overview prompt optimized for Gemini"""
         summary = self.load_analysis_summary()
         
-        prompt = f"""# Spring Boot Project Analysis
+        if self.is_gemini:
+            # Gemini-optimized prompt structure
+            prompt = f"""# Spring Boot Project Analysis for Gemini 2.0 Flash
+
+**Task**: Analyze this Spring Boot project and provide comprehensive insights.
+
+## 📊 Repository Data
+- **URL**: {summary.get('repository_url', 'Unknown')}
+- **Analysis Date**: {summary.get('analysis_timestamp', 'Unknown')}
+- **Total Files**: {summary.get('total_files_analyzed', 0)}
+
+## 📁 File Categories"""
+        else:
+            prompt = f"""# Spring Boot Project Analysis
 
 I have analyzed a Git repository and need you to provide a comprehensive project overview. Here's the analysis data:
 
@@ -106,30 +150,70 @@ I have analyzed a Git repository and need you to provide a comprehensive project
 - **Analysis Date**: {summary.get('analysis_timestamp', 'Unknown')}
 - **Total Files Analyzed**: {summary.get('total_files_analyzed', 0)}
 
-## File Categories
-"""
+## File Categories"""
         
         if 'categories' in summary:
             for category in summary['categories']:
                 if isinstance(category, dict):
-                    prompt += f"- **{category.get('category', 'Unknown')}**: {category.get('file_count', 0)} files\n"
+                    prompt += f"\n- **{category.get('category', 'Unknown')}**: {category.get('file_count', 0)} files"
         
-        prompt += "\n## Spring Boot Features Detected\n"
+        prompt += "\n\n## 🚀 Spring Boot Components Detected"
         
         if 'spring_boot_features' in summary:
             features = summary['spring_boot_features']
             if isinstance(features, dict) and 'note' not in features:
-                prompt += f"- **Controllers**: {features.get('controllers', 0)}\n"
-                prompt += f"- **Services**: {features.get('services', 0)}\n"
-                prompt += f"- **Repositories**: {features.get('repositories', 0)}\n"
-                prompt += f"- **Components**: {features.get('components', 0)}\n"
+                prompt += f"\n- **Controllers**: {features.get('controllers', 0)}"
+                prompt += f"\n- **Services**: {features.get('services', 0)}"
+                prompt += f"\n- **Repositories**: {features.get('repositories', 0)}"
+                prompt += f"\n- **Components**: {features.get('components', 0)}"
         
         if 'sample_packages' in summary:
-            prompt += f"\n## Sample Package Structure\n"
-            for package in summary['sample_packages'][:10]:  # Show top 10
-                prompt += f"- {package}\n"
+            prompt += f"\n\n## 📦 Package Structure Sample"
+            for package in summary['sample_packages'][:10]:
+                prompt += f"\n- {package}"
         
-        prompt += """
+        if self.is_gemini:
+            # Gemini prefers structured, clear requests
+            prompt += """
+
+## 🎯 Analysis Request
+
+Please provide a **comprehensive analysis** in the following structure:
+
+### 1. 🏗️ **Project Type & Architecture**
+- What type of Spring Boot application is this?
+- What architectural patterns are being used?
+
+### 2. 🛠️ **Technology Stack**
+- Core technologies and frameworks identified
+- Dependencies and integrations
+
+### 3. 📐 **Architecture Analysis**
+- Layered architecture assessment
+- Design patterns observed
+- Component organization
+
+### 4. 🔧 **Key Components**
+- Main application components and their roles
+- Inter-component relationships
+
+### 5. 💼 **Business Domain**
+- Inferred business purpose
+- Domain-specific functionality
+
+### 6. ✅ **Code Quality Assessment**
+- Organization and structure quality
+- Naming conventions and patterns
+
+### 7. 💡 **Recommendations**
+- Improvement suggestions
+- Best practices recommendations
+- Areas for further investigation
+
+**Note**: Base your analysis on the quantitative data provided above. Be specific and actionable in your recommendations.
+"""
+        else:
+            prompt += """
 
 ## Analysis Request
 
@@ -154,14 +238,27 @@ Please provide a structured analysis based on this high-level information.
         
         return prompt
     
-    def create_detailed_code_analysis_prompt(self, category: str = "java_files", max_files: int = 10) -> str:
-        """Create detailed code analysis prompt for specific category"""
+    def create_detailed_code_analysis_prompt(self, category: str = "java_files", max_files: int = 15) -> str:
+        """Create detailed code analysis prompt optimized for Gemini's large context"""
+        if self.is_gemini:
+            # Gemini can handle more files due to larger context window
+            max_files = min(max_files * 3, 50)  # Increase file limit for Gemini
+        
         category_data = self.load_category_data(category, limit_files=max_files)
         
         if not category_data.get("files"):
             return f"No files found in category: {category}"
         
-        prompt = f"""# Detailed {category.title()} Analysis
+        if self.is_gemini:
+            prompt = f"""# 🔍 Detailed {category.title()} Analysis - Gemini 2.0 Flash
+
+**Task**: Perform comprehensive code analysis on these Spring Boot {category}.
+
+## 📁 Files for Analysis ({len(category_data['files'])} files)
+
+"""
+        else:
+            prompt = f"""# Detailed {category.title()} Analysis
 
 I need you to analyze the following {category} from a Spring Boot project for detailed insights:
 
@@ -169,12 +266,19 @@ I need you to analyze the following {category} from a Spring Boot project for de
 
 """
         
-        # Add file contents with token management
+        # Add file contents with Gemini-optimized token management
         current_tokens = self.count_tokens(prompt)
         files_added = 0
         
         for file_data in category_data["files"]:
-            file_prompt = f"""
+            if self.is_gemini:
+                file_prompt = f"""
+### 📄 **{file_data.get('file_path', 'Unknown')}**
+- **Size**: {file_data.get('size', 0):,} bytes
+- **Lines**: {file_data.get('lines', 0):,}
+"""
+            else:
+                file_prompt = f"""
 ### File: {file_data.get('file_path', 'Unknown')}
 **Size**: {file_data.get('size', 0)} bytes
 **Lines**: {file_data.get('lines', 0)}
@@ -184,9 +288,14 @@ I need you to analyze the following {category} from a Spring Boot project for de
             # Add Java analysis if available
             if 'java_analysis' in file_data:
                 java_analysis = file_data['java_analysis']
-                file_prompt += f"**Package**: {java_analysis.get('package', 'None')}\n"
-                file_prompt += f"**Spring Annotations**: {', '.join(java_analysis.get('spring_annotations', []))}\n"
-                file_prompt += f"**Import Count**: {java_analysis.get('import_count', 0)}\n\n"
+                if self.is_gemini:
+                    file_prompt += f"- **Package**: `{java_analysis.get('package', 'None')}`\n"
+                    file_prompt += f"- **Spring Annotations**: `{', '.join(java_analysis.get('spring_annotations', []))}`\n"
+                    file_prompt += f"- **Imports**: {java_analysis.get('import_count', 0)} imports\n\n"
+                else:
+                    file_prompt += f"**Package**: {java_analysis.get('package', 'None')}\n"
+                    file_prompt += f"**Spring Annotations**: {', '.join(java_analysis.get('spring_annotations', []))}\n"
+                    file_prompt += f"**Import Count**: {java_analysis.get('import_count', 0)}\n\n"
             
             # Add content (preview or full)
             if 'content' in file_data:
@@ -199,17 +308,82 @@ I need you to analyze the following {category} from a Spring Boot project for de
             
             file_prompt += f"```java\n{content}\n```\n\n"
             
-            # Check token limit
+            # Check token limit (more generous for Gemini)
             file_tokens = self.count_tokens(file_prompt)
-            if current_tokens + file_tokens > self.max_tokens - 1000:  # Reserve 1000 tokens for response
-                prompt += f"*(Truncated due to token limit - showing {files_added} of {len(category_data['files'])} files)*\n\n"
+            reserve_tokens = 2000 if self.is_gemini else 1000
+            
+            if current_tokens + file_tokens > self.max_tokens - reserve_tokens:
+                prompt += f"*(Truncated due to context limit - showing {files_added} of {len(category_data['files'])} files)*\n\n"
                 break
             
             prompt += file_prompt
             current_tokens += file_tokens
             files_added += 1
         
-        prompt += """
+        if self.is_gemini:
+            # Gemini-optimized analysis request
+            prompt += """
+## 🎯 **Comprehensive Analysis Request**
+
+Provide detailed analysis covering these key areas:
+
+### 1. 🏗️ **Code Architecture & Organization**
+- Package structure and organization patterns
+- Class hierarchy and relationships
+- Adherence to SOLID principles
+
+### 2. 🚀 **Spring Boot Framework Usage**
+- Spring annotations and their effectiveness
+- Dependency injection patterns
+- Configuration management
+- Auto-configuration utilization
+
+### 3. 🔄 **Data Flow & Component Interaction**
+- Request/response flow patterns
+- Service layer interactions
+- Data access patterns
+- Error handling mechanisms
+
+### 4. 💼 **Business Logic Implementation**
+- Domain modeling approach
+- Business rule implementation
+- Data validation strategies
+
+### 5. 🔗 **Dependencies & Integration**
+- External service integrations
+- Database interaction patterns
+- Cross-cutting concerns handling
+
+### 6. ✅ **Code Quality Assessment**
+- Naming conventions and clarity
+- Method and class design
+- Code duplication analysis
+- Documentation and comments
+
+### 7. 🛡️ **Security & Performance**
+- Security implementation patterns
+- Performance optimization opportunities
+- Resource management
+
+### 8. 🚨 **Issues & Anti-patterns**
+- Code smells identification
+- Design anti-patterns
+- Potential bug sources
+
+### 9. 🎯 **Specific Recommendations**
+- Immediate improvement opportunities
+- Refactoring suggestions
+- Best practice implementations
+
+### 10. 📈 **Metrics & Insights**
+- Complexity analysis
+- Maintainability assessment
+- Scalability considerations
+
+**Instructions**: Be specific and reference actual code elements. Provide actionable recommendations with examples where possible.
+"""
+        else:
+            prompt += """
 ## Analysis Request
 
 Please provide detailed analysis covering:
@@ -549,8 +723,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
 
 
