@@ -19,19 +19,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GitRepoAnalyzer:
-    def __init__(self, repo_url: str, output_dir: str = "analysis_output"):
+    def __init__(self, repo_url: str, output_dir: str = "analysis_output", 
+                 max_file_size_mb: int = 1, batch_size: int = 50, 
+                 max_chunk_size: int = 2000):
         self.repo_url = repo_url
         self.output_dir = Path(output_dir)
         self.repo_dir = self.output_dir / "cloned_repo"
         self.analysis_dir = self.output_dir / "analysis"
+        
+        # Memory optimization settings
+        self.max_file_size = max_file_size_mb * 1024 * 1024  # Convert MB to bytes
+        self.batch_size = batch_size  # Process files in batches
+        self.max_chunk_size = max_chunk_size  # Smaller chunks to reduce memory
+        self.max_files_in_memory = 20  # Limit files held in memory
         
         # File extensions to analyze for Java Spring Boot projects
         self.java_extensions = {'.java', '.xml', '.properties', '.yml', '.yaml'}
         self.config_files = {'pom.xml', 'build.gradle', 'application.properties', 
                            'application.yml', 'application.yaml'}
         
-        # Max file size for processing (1MB)
-        self.max_file_size = 1024 * 1024
+        logger.info(f"Memory settings: max_file_size={max_file_size_mb}MB, "
+                   f"batch_size={batch_size}, max_chunk_size={max_chunk_size}")
         
     def setup_directories(self):
         """Create necessary directories for analysis"""
@@ -153,10 +161,30 @@ class GitRepoAnalyzer:
         return file_categories
     
     def extract_file_content(self, file_path: Path) -> Dict[str, Any]:
-        """Extract content and metadata from a file"""
+        """Extract content and metadata from a file with memory optimization"""
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+            # Check file size first
+            file_size = file_path.stat().st_size
+            if file_size > self.max_file_size:
+                logger.warning(f"Skipping large file {file_path}: {file_size/1024/1024:.1f}MB")
+                return None
+            
+            # Read file in chunks for large files
+            content = ""
+            if file_size > 100 * 1024:  # 100KB threshold for chunked reading
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    while True:
+                        chunk = f.read(8192)  # Read 8KB chunks
+                        if not chunk:
+                            break
+                        content += chunk
+                        # Prevent excessive memory usage
+                        if len(content) > self.max_file_size:
+                            logger.warning(f"File {file_path} too large, truncating")
+                            break
+            else:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
             
             relative_path = file_path.relative_to(self.repo_dir)
             
@@ -170,12 +198,18 @@ class GitRepoAnalyzer:
                 'is_test': 'test' in str(file_path).lower(),
                 'timestamp': datetime.now().isoformat()
             }
+        except MemoryError:
+            logger.error(f"Memory error reading file {file_path}")
+            return None
         except Exception as e:
             logger.warning(f"Could not read file {file_path}: {e}")
             return None
     
-    def chunk_content(self, content: str, chunk_size: int = 4000, overlap: int = 200) -> List[str]:
-        """Split content into overlapping chunks for Gen AI processing"""
+    def chunk_content(self, content: str, chunk_size: int = None, overlap: int = 100) -> List[str]:
+        """Split content into overlapping chunks with memory optimization"""
+        if chunk_size is None:
+            chunk_size = self.max_chunk_size
+            
         if len(content) <= chunk_size:
             return [content]
         
@@ -192,12 +226,18 @@ class GitRepoAnalyzer:
                 if last_newline != -1 and last_newline > start:
                     end = last_newline + 1
             
-            chunks.append(content[start:end])
+            chunk = content[start:end]
+            chunks.append(chunk)
             
             if end >= len(content):
                 break
                 
             start = end - overlap
+            
+            # Memory protection: if too many chunks, break
+            if len(chunks) > 100:  # Limit chunks per file
+                logger.warning("Too many chunks for file, truncating")
+                break
         
         return chunks
     
@@ -251,102 +291,164 @@ class GitRepoAnalyzer:
         return analysis
     
     def process_files(self, file_categories: Dict[str, List[Path]]):
-        """Process all files and create analysis outputs"""
-        logger.info("Processing files for analysis...")
+        """Process files in batches with memory optimization"""
+        logger.info("Processing files for analysis with memory optimization...")
         
-        all_files_data = []
-        
+        # Process each category separately to manage memory
         for category, files in file_categories.items():
-            category_data = []
+            if not files:
+                continue
+                
+            logger.info(f"Processing {len(files)} {category}...")
             
-            for file_path in files:
-                file_content = self.extract_file_content(file_path)
-                if file_content is None:
-                    continue
-                
-                # Add Java-specific analysis for Java files
-                if file_path.suffix == '.java':
-                    file_content['java_analysis'] = self.analyze_java_structure(file_content)
-                
-                # Create chunks for large files
-                if file_content['size'] > 2000:
-                    chunks = self.chunk_content(file_content['content'])
-                    file_content['chunks'] = chunks
-                    file_content['chunk_count'] = len(chunks)
-                
-                category_data.append(file_content)
-                all_files_data.append(file_content)
+            # Process files in batches
+            category_file_path = self.analysis_dir / f"{category}.json"
             
-            # Save category-specific data
-            if category_data:
-                output_file = self.analysis_dir / f"{category}.json"
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(category_data, f, indent=2, ensure_ascii=False)
-                logger.info(f"Saved {len(category_data)} files to {output_file}")
+            # Initialize the JSON file
+            with open(category_file_path, 'w', encoding='utf-8') as f:
+                f.write('[')  # Start JSON array
+            
+            processed_count = 0
+            
+            for i in range(0, len(files), self.batch_size):
+                batch = files[i:i + self.batch_size]
+                logger.info(f"Processing batch {i//self.batch_size + 1}/{(len(files) + self.batch_size - 1)//self.batch_size}")
+                
+                batch_data = []
+                
+                for file_path in batch:
+                    try:
+                        file_content = self.extract_file_content(file_path)
+                        if file_content is None:
+                            continue
+                        
+                        # Add Java-specific analysis for Java files
+                        if file_path.suffix == '.java':
+                            file_content['java_analysis'] = self.analyze_java_structure(file_content)
+                        
+                        # Create chunks for larger files (but smaller threshold)
+                        if file_content['size'] > 1000:  # Reduced from 2000
+                            chunks = self.chunk_content(file_content['content'])
+                            file_content['chunks'] = chunks
+                            file_content['chunk_count'] = len(chunks)
+                            # Remove original content to save memory
+                            del file_content['content']
+                        
+                        batch_data.append(file_content)
+                        processed_count += 1
+                        
+                    except MemoryError:
+                        logger.error(f"Memory error processing {file_path}, skipping")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Error processing {file_path}: {e}")
+                        continue
+                
+                # Append batch to JSON file
+                if batch_data:
+                    with open(category_file_path, 'a', encoding='utf-8') as f:
+                        if processed_count > len(batch_data):  # Not the first batch
+                            f.write(',')
+                        json.dump(batch_data, f, indent=2, ensure_ascii=False)
+                        if i + self.batch_size < len(files):  # Not the last batch
+                            f.write(',')
+                
+                # Clear batch data from memory
+                del batch_data
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+            
+            # Close JSON array
+            with open(category_file_path, 'a', encoding='utf-8') as f:
+                f.write(']')
+            
+            logger.info(f"Saved {processed_count} files to {category_file_path}")
         
-        # Save combined analysis
-        combined_file = self.analysis_dir / "combined_analysis.json"
-        with open(combined_file, 'w', encoding='utf-8') as f:
-            json.dump(all_files_data, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Saved combined analysis with {len(all_files_data)} files")
-        
-        return all_files_data
+        # Create a lightweight summary instead of loading all data
+        return self.create_lightweight_summary()
     
-    def create_summary_report(self, all_files_data: List[Dict[str, Any]]):
-        """Create a summary report of the analysis"""
+    def create_lightweight_summary(self):
+        """Create summary without loading all files into memory"""
+        logger.info("Creating lightweight summary...")
+        
+        summary_data = []
+        total_files = 0
+        
+        # Process each category file
+        for json_file in self.analysis_dir.glob("*.json"):
+            if json_file.name == "summary_report.json":
+                continue
+                
+            category = json_file.stem
+            file_count = 0
+            
+            try:
+                # Count files without loading entire JSON
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    # Simple count by counting file_path occurrences
+                    file_count = content.count('"file_path":')
+                
+                total_files += file_count
+                summary_data.append({
+                    'category': category,
+                    'file_count': file_count,
+                    'file_size': json_file.stat().st_size
+                })
+                
+            except Exception as e:
+                logger.warning(f"Could not process {json_file}: {e}")
+        
+        logger.info(f"Lightweight summary: {total_files} files across {len(summary_data)} categories")
+        return summary_data
+    
+    def create_summary_report(self, summary_data: List[Dict[str, Any]]):
+        """Create a memory-efficient summary report"""
         summary = {
             'analysis_timestamp': datetime.now().isoformat(),
             'repository_url': self.repo_url,
-            'total_files_analyzed': len(all_files_data),
-            'file_statistics': {},
-            'spring_boot_features': {
-                'controllers': 0,
-                'services': 0,
-                'repositories': 0,
-                'components': 0,
-                'configuration_files': 0
-            },
-            'packages': set(),
-            'dependencies': set()
+            'total_files_analyzed': sum(item['file_count'] for item in summary_data),
+            'categories': summary_data,
+            'memory_optimized': True,
+            'settings': {
+                'max_file_size_mb': self.max_file_size / (1024 * 1024),
+                'batch_size': self.batch_size,
+                'max_chunk_size': self.max_chunk_size
+            }
         }
         
-        # Gather statistics
-        for file_data in all_files_data:
-            extension = file_data.get('extension', 'unknown')
-            summary['file_statistics'][extension] = summary['file_statistics'].get(extension, 0) + 1
-            
-            # Analyze Java files for Spring Boot features
-            if 'java_analysis' in file_data:
-                java_analysis = file_data['java_analysis']
+        # Add basic statistics from existing JSON files
+        try:
+            # Read a sample of java files to get Spring Boot info
+            java_file = self.analysis_dir / "java_files.json"
+            if java_file.exists():
+                spring_features = {'controllers': 0, 'services': 0, 'repositories': 0}
+                packages = set()
                 
-                if java_analysis['package']:
-                    summary['packages'].add(java_analysis['package'])
+                # Parse in chunks to avoid memory issues
+                with open(java_file, 'r', encoding='utf-8') as f:
+                    # Read first 100KB to get a sample
+                    sample_content = f.read(100 * 1024)
+                    
+                    # Count Spring annotations in sample
+                    spring_features['controllers'] = sample_content.count('@Controller') + sample_content.count('@RestController')
+                    spring_features['services'] = sample_content.count('@Service')
+                    spring_features['repositories'] = sample_content.count('@Repository')
                 
-                for annotation in java_analysis['spring_annotations']:
-                    if 'Controller' in annotation:
-                        summary['spring_boot_features']['controllers'] += 1
-                    elif 'Service' in annotation:
-                        summary['spring_boot_features']['services'] += 1
-                    elif 'Repository' in annotation:
-                        summary['spring_boot_features']['repositories'] += 1
-                    elif 'Component' in annotation:
-                        summary['spring_boot_features']['components'] += 1
-                
-                for import_stmt in java_analysis['imports']:
-                    if 'springframework' in import_stmt:
-                        summary['dependencies'].add(import_stmt)
+                summary['spring_boot_features'] = spring_features
         
-        # Convert sets to lists for JSON serialization
-        summary['packages'] = list(summary['packages'])
-        summary['dependencies'] = list(summary['dependencies'])
+        except Exception as e:
+            logger.warning(f"Could not analyze Spring Boot features: {e}")
+            summary['spring_boot_features'] = {'note': 'Analysis skipped due to memory constraints'}
         
         # Save summary report
         summary_file = self.analysis_dir / "summary_report.json"
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"Summary report saved to {summary_file}")
+        logger.info(f"Memory-optimized summary report saved to {summary_file}")
         return summary
     
     def run_analysis(self, repo_branch: str = "main"):
@@ -398,25 +500,27 @@ class GitRepoAnalyzer:
             # Step 5: Process files
             step = "file processing"
             logger.info(f"STEP 5: {step}")
-            all_files_data = self.process_files(file_categories)
+            summary_data = self.process_files(file_categories)
             logger.info("✅ File processing completed")
             
             # Step 6: Create summary
             step = "summary generation"
             logger.info(f"STEP 6: {step}")
-            summary = self.create_summary_report(all_files_data)
+            summary = self.create_summary_report(summary_data)
             logger.info("✅ Summary report generated")
+            
+            total_files = sum(item['file_count'] for item in summary_data)
             
             logger.info("=" * 60)
             logger.info("🎉 Analysis completed successfully!")
             logger.info(f"📁 Results saved in: {self.analysis_dir}")
-            logger.info(f"📊 Total files analyzed: {len(all_files_data)}")
+            logger.info(f"📊 Total files analyzed: {total_files}")
             logger.info("=" * 60)
             
             return {
                 'success': True,
                 'output_directory': str(self.analysis_dir),
-                'files_processed': len(all_files_data),
+                'files_processed': total_files,
                 'summary': summary
             }
             
@@ -466,6 +570,11 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--test-git', action='store_true', help='Test Git installation')
     
+    # Memory optimization options
+    parser.add_argument('--max-file-size', type=int, default=1, help='Maximum file size in MB (default: 1)')
+    parser.add_argument('--batch-size', type=int, default=50, help='Files to process per batch (default: 50)')
+    parser.add_argument('--max-chunk-size', type=int, default=2000, help='Maximum chunk size for large files (default: 2000)')
+    
     args = parser.parse_args()
     
     # Set logging level
@@ -488,13 +597,20 @@ def main():
         print(f"Provided URL: {args.repo_url}")
         exit(1)
     
-    print(f"🚀 Starting analysis...")
+    print(f"🚀 Starting analysis with memory optimization...")
     print(f"📍 Repository: {args.repo_url}")
     print(f"🌿 Branch: {args.branch}")
     print(f"📁 Output: {args.output}")
+    print(f"💾 Memory settings: max_file_size={args.max_file_size}MB, batch_size={args.batch_size}, chunk_size={args.max_chunk_size}")
     print("-" * 50)
     
-    analyzer = GitRepoAnalyzer(args.repo_url, args.output)
+    analyzer = GitRepoAnalyzer(
+        args.repo_url, 
+        args.output,
+        max_file_size_mb=args.max_file_size,
+        batch_size=args.batch_size,
+        max_chunk_size=args.max_chunk_size
+    )
     result = analyzer.run_analysis(args.branch)
     
     print("\n" + "=" * 60)
@@ -514,10 +630,10 @@ def main():
         print(f"📍 Failed at step: {result.get('step_failed', 'unknown')}")
         print(f"🔧 Error type: {result.get('error_type', 'unknown')}")
         print("\n🔍 Troubleshooting tips:")
-        print("   1. Check if Git is installed: git --version")
-        print("   2. Verify repository URL and access permissions")
-        print("   3. Try with --debug flag for more details")
-        print("   4. Use --test-git to test Git installation")
+        print("   1. Reduce memory usage: --max-file-size 0.5 --batch-size 25")
+        print("   2. Use smaller chunks: --max-chunk-size 1000")
+        print("   3. Check available system memory")
+        print("   4. Try with --debug flag for more details")
         exit(1)
 
 def test_git_installation():
@@ -560,305 +676,3 @@ def test_git_installation():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-# Git Repository Analysis Project Structure
-
-## Recommended Folder Structure
-
-```
-git-repo-analyzer/
-├── README.md
-├── requirements.txt
-├── config/
-│   ├── analysis_config.json
-│   └── file_patterns.json
-├── src/
-│   ├── __init__.py
-│   ├── git_analyzer.py          # Main analysis script
-│   ├── file_processor.py        # File processing utilities
-│   ├── chunking_strategies.py   # Content chunking for Gen AI
-│   └── utils/
-│       ├── __init__.py
-│       ├── file_utils.py
-│       └── logging_config.py
-├── analysis_output/             # Generated during analysis
-│   ├── cloned_repo/            # Cloned repository
-│   └── analysis/               # Analysis results
-│       ├── java_files.json
-│       ├── config_files.json
-│       ├── test_files.json
-│       ├── chunks/
-│       ├── metadata/
-│       └── summary_report.json
-├── scripts/
-│   ├── run_analysis.py         # Entry point script
-│   └── batch_analysis.py       # For multiple repositories
-└── tests/
-    ├── __init__.py
-    ├── test_analyzer.py
-    └── sample_data/
-```
-
-## Installation and Setup
-
-### 1. Create Virtual Environment
-
-```bash
-# Create project directory
-mkdir git-repo-analyzer
-cd git-repo-analyzer
-
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# On Windows:
-venv\Scripts\activate
-# On macOS/Linux:
-source venv/bin/activate
-```
-
-### 2. Install Dependencies
-
-Create `requirements.txt`:
-
-```txt
-GitPython==3.1.40
-requests==2.31.0
-python-dotenv==1.0.0
-tiktoken==0.5.2
-beautifulsoup4==4.12.2
-langchain==0.1.0
-langchain-community==0.0.10
-python-magic==0.4.27
-chardet==5.2.0
-pathspec==0.12.1
-```
-
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configuration Files
-
-#### `config/analysis_config.json`
-```json
-{
-  "chunk_settings": {
-    "default_chunk_size": 4000,
-    "overlap_size": 200,
-    "min_chunk_size": 100
-  },
-  "file_settings": {
-    "max_file_size_mb": 1,
-    "excluded_directories": [
-      "target",
-      "build",
-      "node_modules",
-      ".git",
-      ".idea",
-      ".vscode"
-    ],
-    "included_extensions": [
-      ".java",
-      ".xml",
-      ".properties",
-      ".yml",
-      ".yaml",
-      ".sql",
-      ".json"
-    ]
-  },
-  "spring_boot_patterns": {
-    "controller_annotations": [
-      "@Controller",
-      "@RestController"
-    ],
-    "service_annotations": [
-      "@Service",
-      "@Component"
-    ],
-    "repository_annotations": [
-      "@Repository"
-    ],
-    "configuration_files": [
-      "application.properties",
-      "application.yml",
-      "application.yaml",
-      "pom.xml",
-      "build.gradle"
-    ]
-  },
-  "gen_ai_settings": {
-    "context_window_size": 8000,
-    "preserve_code_structure": true,
-    "include_comments": true,
-    "extract_documentation": true
-  }
-}
-```
-
-#### `config/file_patterns.json`
-```json
-{
-  "java_patterns": {
-    "class_pattern": "^\\s*(public|private|protected)?\\s*class\\s+\\w+",
-    "interface_pattern": "^\\s*(public|private|protected)?\\s*interface\\s+\\w+",
-    "method_pattern": "^\\s*(public|private|protected)\\s+.*\\s+\\w+\\s*\\(",
-    "annotation_pattern": "^\\s*@\\w+"
-  },
-  "spring_patterns": {
-    "rest_endpoint": "@(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping)",
-    "dependency_injection": "@(Autowired|Inject|Resource)",
-    "configuration": "@(Configuration|EnableAutoConfiguration|ComponentScan)"
-  }
-}
-```
-
-## Usage Examples
-
-### Basic Usage
-
-```bash
-# Clone and analyze a repository
-python git_analyzer.py https://gitlab.com/your-org/your-spring-boot-repo.git
-
-# Specify branch and output directory
-python git_analyzer.py https://gitlab.com/your-org/repo.git --branch develop --output my_analysis
-```
-
-### Advanced Usage with Configuration
-
-```python
-from git_analyzer import GitRepoAnalyzer
-
-# Initialize analyzer with custom settings
-analyzer = GitRepoAnalyzer(
-    repo_url="https://gitlab.com/your-org/your-repo.git",
-    output_dir="analysis_results"
-)
-
-# Run analysis
-result = analyzer.run_analysis(repo_branch="main")
-
-if result['success']:
-    print(f"Analysis completed: {result['files_processed']} files processed")
-    print(f"Results saved to: {result['output_directory']}")
-else:
-    print(f"Analysis failed: {result['error']}")
-```
-
-## Key Features
-
-### 1. **Repository Cloning**
-- Clones GitLab repositories
-- Supports different branches
-- Handles authentication (configure Git credentials)
-
-### 2. **File Categorization**
-- Java source files
-- Configuration files (XML, Properties, YAML)
-- Test files
-- Resource files
-
-### 3. **Content Chunking**
-- Splits large files for Gen AI processing
-- Configurable chunk sizes with overlap
-- Preserves code structure boundaries
-
-### 4. **Spring Boot Analysis**
-- Identifies Spring annotations
-- Extracts REST endpoints
-- Analyzes dependency injection patterns
-- Configuration file parsing
-
-### 5. **Gen AI Preparation**
-- JSON output format
-- Metadata extraction
-- Context preservation
-- Structured data for LLM consumption
-
-## Output Files
-
-### `java_files.json`
-Contains all Java source files with:
-- File content and metadata
-- Package and import analysis
-- Spring annotations detection
-- Method and class extraction
-
-### `config_files.json`
-Configuration files including:
-- application.properties/yml
-- pom.xml or build.gradle
-- Other configuration files
-
-### `summary_report.json`
-High-level analysis including:
-- File statistics
-- Spring Boot component counts
-- Package structure
-- Dependency analysis
-
-## Authentication for Private Repositories
-
-### Using Git Credentials
-```bash
-# Set up Git credentials
-git config --global user.name "Your Name"
-git config --global user.email "your.email@example.com"
-
-# For GitLab, use personal access token
-git config --global credential.helper store
-```
-
-### Using Environment Variables
-Create a `.env` file:
-```bash
-GITLAB_TOKEN=your_personal_access_token
-GITLAB_USERNAME=your_username
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Repository Access Denied**
-   - Ensure you have proper GitLab access tokens
-   - Check repository URL format
-
-2. **Large File Processing**
-   - Adjust `max_file_size` in configuration
-   - Files larger than 1MB are skipped by default
-
-3. **Memory Issues**
-   - Reduce chunk sizes for large repositories
-   - Process files in batches
-
-### Logging
-
-The script provides detailed logging. To increase verbosity:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-## Next Steps for Gen AI Integration
-
-After running the analysis, you can:
-
-1. **Feed to LLM**: Use the JSON outputs directly with your Gen AI model
-2. **Vector Database**: Index the chunks for similarity search
-3. **Code Understanding**: Use the structured data for code comprehension tasks
-4. **Documentation**: Generate documentation from the analyzed code
-5. **Code Review**: Identify patterns and potential improvements
