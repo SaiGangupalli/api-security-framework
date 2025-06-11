@@ -304,41 +304,75 @@ class GitRepoAnalyzer:
         return analysis
     
     def process_files(self, file_categories: Dict[str, List[Path]]):
-        """Process files in batches with memory optimization and proper file creation"""
-        logger.info("Processing files for analysis with memory optimization...")
+        """Process files in batches with proper folder organization"""
+        logger.info("Processing files for analysis with proper folder organization...")
         
         all_categories_summary = []
         
-        # Process each category separately to manage memory
+        # Process each category separately and save to appropriate folders
         for category, files in file_categories.items():
+            logger.info(f"Processing category: {category}")
+            
+            # Create category-specific folders
+            category_dir = self.analysis_dir / category
+            category_dir.mkdir(exist_ok=True)
+            
             if not files:
                 logger.info(f"No files found for category: {category}")
-                # Create empty file for the category
-                empty_file = self.analysis_dir / f"{category}.json"
-                with open(empty_file, 'w', encoding='utf-8') as f:
+                # Create empty summary file for the category
+                summary_file = category_dir / "summary.json"
+                with open(summary_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'category': category,
+                        'file_count': 0,
+                        'files': []
+                    }, f, indent=2)
+                logger.info(f"Created empty summary: {summary_file}")
+                
+                # Also create the main category JSON in analysis root for compatibility
+                main_category_file = self.analysis_dir / f"{category}.json"
+                with open(main_category_file, 'w', encoding='utf-8') as f:
                     json.dump([], f, indent=2)
-                logger.info(f"Created empty file: {empty_file}")
+                
+                all_categories_summary.append({
+                    'category': category,
+                    'file_count': 0,
+                    'chunk_files': 0,
+                    'category_directory': str(category_dir.relative_to(self.analysis_dir)),
+                    'main_file': f"{category}.json"
+                })
                 continue
                 
-            logger.info(f"Processing {len(files)} {category}...")
+            logger.info(f"Processing {len(files)} {category} files...")
             
-            # Process files in batches
-            category_file_path = self.analysis_dir / f"{category}.json"
-            chunks_dir = self.analysis_dir / "chunks" / category
+            # Create subdirectories for this category
+            individual_files_dir = category_dir / "individual_files"
+            chunks_dir = category_dir / "chunks"
+            individual_files_dir.mkdir(exist_ok=True)
             chunks_dir.mkdir(exist_ok=True)
             
-            # Initialize the JSON file with proper array structure
-            all_category_data = []
+            # Main category JSON file (in analysis root for compatibility)
+            main_category_file = self.analysis_dir / f"{category}.json"
+            
+            # Category summary data
+            category_summary = {
+                'category': category,
+                'total_files': len(files),
+                'processed_files': 0,
+                'chunk_files': 0,
+                'files': []
+            }
+            
+            all_files_data = []
             processed_count = 0
             chunk_file_count = 0
             
+            # Process files in batches
             for i in range(0, len(files), self.batch_size):
                 batch = files[i:i + self.batch_size]
                 batch_num = i//self.batch_size + 1
                 total_batches = (len(files) + self.batch_size - 1)//self.batch_size
                 logger.info(f"Processing {category} batch {batch_num}/{total_batches} ({len(batch)} files)")
-                
-                batch_data = []
                 
                 for file_path in batch:
                     try:
@@ -350,30 +384,58 @@ class GitRepoAnalyzer:
                         if file_path.suffix == '.java':
                             file_content['java_analysis'] = self.analyze_java_structure(file_content)
                         
-                        # Handle chunking and save chunks separately
+                        # Save individual file to its own JSON file
+                        safe_filename = self.create_safe_filename(file_content['file_path'])
+                        individual_file_path = individual_files_dir / f"{safe_filename}.json"
+                        
+                        # Handle chunking for large files
                         if file_content['size'] > 1000:  # Threshold for chunking
                             chunks = self.chunk_content(file_content['content'])
                             file_content['chunk_count'] = len(chunks)
                             
-                            # Save chunks to separate files
+                            # Save chunks to separate file
                             if chunks:
                                 chunk_file_count += 1
-                                chunk_file = chunks_dir / f"file_{chunk_file_count:04d}_chunks.json"
+                                chunk_file = chunks_dir / f"{safe_filename}_chunks.json"
                                 chunk_data = {
                                     'source_file': file_content['file_path'],
                                     'chunk_count': len(chunks),
+                                    'original_size': file_content['size'],
                                     'chunks': chunks
                                 }
+                                
                                 with open(chunk_file, 'w', encoding='utf-8') as f:
                                     json.dump(chunk_data, f, indent=2, ensure_ascii=False)
                                 
-                                # Reference chunk file instead of storing content
+                                # Reference chunk file and remove large content
                                 file_content['chunks_file'] = str(chunk_file.relative_to(self.analysis_dir))
+                                file_content['has_chunks'] = True
+                                # Keep a small sample of content
+                                file_content['content_preview'] = file_content['content'][:500] + "..." if len(file_content['content']) > 500 else file_content['content']
                                 del file_content['content']  # Remove large content
                             else:
-                                file_content['chunks'] = []
+                                file_content['has_chunks'] = False
+                        else:
+                            file_content['has_chunks'] = False
                         
-                        batch_data.append(file_content)
+                        # Save individual file
+                        with open(individual_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(file_content, f, indent=2, ensure_ascii=False)
+                        
+                        # Add to category summary
+                        file_summary = {
+                            'file_path': file_content['file_path'],
+                            'size': file_content['size'],
+                            'extension': file_content['extension'],
+                            'has_chunks': file_content['has_chunks'],
+                            'individual_file': str(individual_file_path.relative_to(self.analysis_dir))
+                        }
+                        
+                        if file_content.get('chunks_file'):
+                            file_summary['chunks_file'] = file_content['chunks_file']
+                        
+                        category_summary['files'].append(file_summary)
+                        all_files_data.append(file_content)
                         processed_count += 1
                         
                     except MemoryError:
@@ -383,13 +445,7 @@ class GitRepoAnalyzer:
                         logger.warning(f"Error processing {file_path}: {e}")
                         continue
                 
-                # Add batch data to category collection
-                all_category_data.extend(batch_data)
-                
-                # Clear batch data from memory
-                del batch_data
-                
-                # Force garbage collection
+                # Force garbage collection after each batch
                 import gc
                 gc.collect()
                 
@@ -397,43 +453,92 @@ class GitRepoAnalyzer:
                 if processed_count > 0 and processed_count % 50 == 0:
                     logger.info(f"  Processed {processed_count}/{len(files)} files in {category}")
             
-            # Save complete category data
-            with open(category_file_path, 'w', encoding='utf-8') as f:
-                json.dump(all_category_data, f, indent=2, ensure_ascii=False)
+            # Update category summary
+            category_summary['processed_files'] = processed_count
+            category_summary['chunk_files'] = chunk_file_count
             
-            logger.info(f"✅ Saved {processed_count} files to {category_file_path}")
-            logger.info(f"✅ Created {chunk_file_count} chunk files in {chunks_dir}")
+            # Save category summary
+            category_summary_file = category_dir / "summary.json"
+            with open(category_summary_file, 'w', encoding='utf-8') as f:
+                json.dump(category_summary, f, indent=2, ensure_ascii=False)
             
-            # Add to summary
+            # Save main category file (for backward compatibility)
+            with open(main_category_file, 'w', encoding='utf-8') as f:
+                json.dump(all_files_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"✅ {category} - Processed {processed_count} files")
+            logger.info(f"   📁 Individual files: {individual_files_dir}")
+            logger.info(f"   📦 Chunks: {chunk_file_count} files in {chunks_dir}")
+            logger.info(f"   📄 Summary: {category_summary_file}")
+            logger.info(f"   📄 Main file: {main_category_file}")
+            
+            # Add to overall summary
             all_categories_summary.append({
                 'category': category,
                 'file_count': processed_count,
                 'chunk_files': chunk_file_count,
-                'output_file': str(category_file_path.relative_to(self.analysis_dir))
+                'category_directory': str(category_dir.relative_to(self.analysis_dir)),
+                'individual_files_directory': str(individual_files_dir.relative_to(self.analysis_dir)),
+                'chunks_directory': str(chunks_dir.relative_to(self.analysis_dir)) if chunk_file_count > 0 else None,
+                'main_file': f"{category}.json",
+                'summary_file': str(category_summary_file.relative_to(self.analysis_dir))
             })
             
-            # Clear category data from memory
-            del all_category_data
+            # Clear data from memory
+            del all_files_data
+            del category_summary
             import gc
             gc.collect()
         
-        # Create combined summary (lightweight)
+        # Create overall combined summary
         self.create_combined_summary(all_categories_summary)
         
         return all_categories_summary
     
+    def create_safe_filename(self, file_path: str) -> str:
+        """Create a safe filename from file path"""
+        # Replace path separators and invalid characters
+        safe_name = file_path.replace('/', '_').replace('\\', '_')
+        safe_name = safe_name.replace(':', '_').replace('?', '_').replace('*', '_')
+        safe_name = safe_name.replace('<', '_').replace('>', '_').replace('|', '_')
+        safe_name = safe_name.replace('"', '_').replace(' ', '_')
+        
+        # Limit length
+        if len(safe_name) > 100:
+            name_part = safe_name[:80]
+            ext_part = safe_name[-15:] if '.' in safe_name[-20:] else ""
+            safe_name = name_part + "_" + ext_part
+        
+        return safe_name
+    
     def create_combined_summary(self, categories_summary: List[Dict[str, Any]]):
-        """Create a combined summary file"""
+        """Create a combined summary file with detailed folder structure"""
         combined_summary = {
             'analysis_timestamp': datetime.now().isoformat(),
             'repository_url': self.repo_url,
             'categories': categories_summary,
             'total_files': sum(cat['file_count'] for cat in categories_summary),
             'total_chunk_files': sum(cat['chunk_files'] for cat in categories_summary),
-            'output_structure': {
-                'main_files': [cat['output_file'] for cat in categories_summary],
-                'chunk_directories': ['chunks/' + cat['category'] for cat in categories_summary if cat['chunk_files'] > 0],
-                'metadata_files': ['summary_report.json', 'combined_summary.json']
+            'folder_structure': {
+                'analysis/': 'Main analysis directory',
+                'analysis/*.json': 'Category summary files (for compatibility)',
+                'analysis/java_files/': 'Java source files organization',
+                'analysis/java_files/individual_files/': 'Individual Java files',
+                'analysis/java_files/chunks/': 'Chunked Java files',
+                'analysis/java_files/summary.json': 'Java files summary',
+                'analysis/config_files/': 'Configuration files organization',
+                'analysis/config_files/individual_files/': 'Individual config files',
+                'analysis/config_files/chunks/': 'Chunked config files',
+                'analysis/config_files/summary.json': 'Config files summary',
+                'analysis/test_files/': 'Test files organization',
+                'analysis/resource_files/': 'Resource files organization',
+                'analysis/other_files/': 'Other files organization'
+            },
+            'usage_guide': {
+                'individual_files': 'Each file saved separately in category/individual_files/',
+                'chunks': 'Large files split into chunks in category/chunks/',
+                'summaries': 'Category overview in category/summary.json',
+                'compatibility': 'Main *.json files in analysis/ for backward compatibility'
             }
         }
         
@@ -460,18 +565,24 @@ class GitRepoAnalyzer:
             'output_files': {}
         }
         
-        # Document all output files that were created
+        # Document all output files that were created with new structure
         for category_info in summary_data:
             category = category_info['category']
-            main_file = self.analysis_dir / f"{category}.json"
-            chunks_dir = self.analysis_dir / "chunks" / category
             
             summary['output_files'][category] = {
                 'main_file': f"{category}.json",
                 'file_count': category_info['file_count'],
                 'chunk_files': category_info['chunk_files'],
-                'chunks_directory': f"chunks/{category}" if category_info['chunk_files'] > 0 else None,
-                'exists': main_file.exists()
+                'category_directory': category_info.get('category_directory'),
+                'individual_files_directory': category_info.get('individual_files_directory'),
+                'chunks_directory': category_info.get('chunks_directory'),
+                'summary_file': category_info.get('summary_file'),
+                'structure': {
+                    'main_json': f"Main category file: {category}.json",
+                    'folder': f"Organized files: {category_info.get('category_directory', 'N/A')}",
+                    'individual': f"Individual files: {category_info.get('individual_files_directory', 'N/A')}",
+                    'chunks': f"Chunk files: {category_info.get('chunks_directory', 'N/A') if category_info['chunk_files'] > 0 else 'No chunks'}"
+                }
             }
         
         # Add basic statistics from existing JSON files
@@ -524,28 +635,49 @@ class GitRepoAnalyzer:
         
         logger.info(f"✅ Memory-optimized summary report saved to {summary_file}")
         
-        # Also create a simple file listing for easy reference
-        file_listing = self.analysis_dir / "file_listing.txt"
-        with open(file_listing, 'w', encoding='utf-8') as f:
-            f.write("Git Repository Analysis - Generated Files\n")
+        # Also create a detailed file structure document
+        structure_file = self.analysis_dir / "file_structure.txt"
+        with open(structure_file, 'w', encoding='utf-8') as f:
+            f.write("Git Repository Analysis - File Structure\n")
             f.write("=" * 50 + "\n\n")
             
-            f.write("Main Analysis Files:\n")
+            f.write("📁 FOLDER ORGANIZATION:\n")
+            f.write("-" * 25 + "\n")
+            f.write("analysis/\n")
+            f.write("├── *.json                    # Main category files (for compatibility)\n")
+            f.write("├── summary_report.json       # Overall analysis summary\n")
+            f.write("├── combined_summary.json     # File structure summary\n")
+            f.write("├── file_structure.txt        # This file\n")
+            f.write("└── [category_folders]/       # Organized by file type\n")
+            f.write("    ├── individual_files/     # Each file saved separately\n")
+            f.write("    ├── chunks/               # Large files split into chunks\n")
+            f.write("    └── summary.json          # Category-specific summary\n\n")
+            
+            f.write("📊 CATEGORIES PROCESSED:\n")
+            f.write("-" * 25 + "\n")
             for category_info in summary_data:
                 category = category_info['category']
-                f.write(f"  📄 {category}.json ({category_info['file_count']} files)\n")
-                if category_info['chunk_files'] > 0:
-                    f.write(f"     └── chunks/{category}/ ({category_info['chunk_files']} chunk files)\n")
+                f.write(f"📂 {category}/\n")
+                f.write(f"   📄 Files: {category_info['file_count']}\n")
+                f.write(f"   📦 Chunks: {category_info['chunk_files']}\n")
+                f.write(f"   📁 Location: {category_info.get('category_directory', 'N/A')}\n\n")
             
-            f.write(f"\nSummary Files:\n")
-            f.write(f"  📊 summary_report.json\n")
-            f.write(f"  📋 combined_summary.json\n")
-            f.write(f"  📝 file_listing.txt\n")
+            f.write("🎯 HOW TO USE:\n")
+            f.write("-" * 15 + "\n")
+            f.write("1. Main JSON files (*.json) contain all files for quick access\n")
+            f.write("2. Individual files in [category]/individual_files/ for detailed analysis\n")
+            f.write("3. Large files split into chunks in [category]/chunks/\n")
+            f.write("4. Category summaries in [category]/summary.json\n")
+            f.write("5. Overall summary in summary_report.json\n\n")
             
-            f.write(f"\nTotal Files Analyzed: {summary['total_files_analyzed']}\n")
+            f.write(f"📈 STATISTICS:\n")
+            f.write("-" * 15 + "\n")
+            f.write(f"Total Files Analyzed: {summary['total_files_analyzed']}\n")
+            f.write(f"Total Categories: {len(summary_data)}\n")
+            f.write(f"Total Chunk Files: {sum(cat['chunk_files'] for cat in summary_data)}\n")
             f.write(f"Analysis Date: {summary['analysis_timestamp']}\n")
         
-        logger.info(f"✅ Created file listing: {file_listing}")
+        logger.info(f"✅ Created detailed file structure: {structure_file}")
         return summary
     
     def run_analysis(self, repo_branch: str = "main"):
