@@ -947,3 +947,327 @@ if __name__ == "__main__":
 
 
 
+
+
+
+#!/usr/bin/env python3
+"""
+Format-Preserving Excel Processor
+Maintains original Excel formatting while updating content
+"""
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Border, Alignment
+from openpyxl.utils.dataframe import dataframe_to_rows
+import pandas as pd
+import logging
+from typing import Dict, Any, List
+from copy import copy
+import os
+
+logger = logging.getLogger(__name__)
+
+class FormatPreservingProcessor:
+    def __init__(self):
+        self.original_styles = {}
+        self.column_mappings = {}
+        
+    def load_workbook_with_formatting(self, file_path: str):
+        """Load workbook while preserving all formatting"""
+        try:
+            # Load with openpyxl to preserve formatting
+            workbook = openpyxl.load_workbook(file_path, data_only=False)
+            worksheet = workbook.active
+            
+            logger.info(f"Loaded workbook with {worksheet.max_row} rows and {worksheet.max_column} columns")
+            return workbook, worksheet
+            
+        except Exception as e:
+            logger.error(f"Error loading workbook: {e}")
+            raise
+    
+    def extract_formatting(self, worksheet):
+        """Extract all formatting information from the worksheet"""
+        formatting_data = {}
+        
+        for row in worksheet.iter_rows():
+            for cell in row:
+                if cell.coordinate not in formatting_data:
+                    formatting_data[cell.coordinate] = {
+                        'font': copy(cell.font) if cell.font else None,
+                        'fill': copy(cell.fill) if cell.fill else None,
+                        'border': copy(cell.border) if cell.border else None,
+                        'alignment': copy(cell.alignment) if cell.alignment else None,
+                        'number_format': cell.number_format,
+                        'protection': copy(cell.protection) if cell.protection else None
+                    }
+        
+        # Also preserve row heights and column widths
+        row_dimensions = {}
+        for row_num in range(1, worksheet.max_row + 1):
+            if worksheet.row_dimensions[row_num].height:
+                row_dimensions[row_num] = worksheet.row_dimensions[row_num].height
+        
+        column_dimensions = {}
+        for col_letter in [worksheet.cell(1, col).column_letter for col in range(1, worksheet.max_column + 1)]:
+            if worksheet.column_dimensions[col_letter].width:
+                column_dimensions[col_letter] = worksheet.column_dimensions[col_letter].width
+        
+        return formatting_data, row_dimensions, column_dimensions
+    
+    def apply_formatting(self, worksheet, formatting_data, row_dimensions, column_dimensions):
+        """Apply preserved formatting to the worksheet"""
+        # Apply cell formatting
+        for coordinate, formats in formatting_data.items():
+            try:
+                cell = worksheet[coordinate]
+                if formats['font']:
+                    cell.font = formats['font']
+                if formats['fill']:
+                    cell.fill = formats['fill']
+                if formats['border']:
+                    cell.border = formats['border']
+                if formats['alignment']:
+                    cell.alignment = formats['alignment']
+                if formats['number_format']:
+                    cell.number_format = formats['number_format']
+                if formats['protection']:
+                    cell.protection = formats['protection']
+            except Exception as e:
+                logger.warning(f"Could not apply formatting to {coordinate}: {e}")
+        
+        # Apply row heights
+        for row_num, height in row_dimensions.items():
+            worksheet.row_dimensions[row_num].height = height
+        
+        # Apply column widths
+        for col_letter, width in column_dimensions.items():
+            worksheet.column_dimensions[col_letter].width = width
+    
+    def get_column_mapping(self, worksheet):
+        """Get mapping of column names to column indices"""
+        headers = {}
+        header_row = 1  # Assume first row contains headers
+        
+        for col in range(1, worksheet.max_column + 1):
+            cell_value = worksheet.cell(header_row, col).value
+            if cell_value:
+                headers[str(cell_value).strip()] = col
+        
+        logger.info(f"Found columns: {list(headers.keys())}")
+        return headers
+    
+    def convert_to_dataframe(self, worksheet):
+        """Convert worksheet to DataFrame while preserving data"""
+        data = []
+        headers = []
+        
+        # Get headers from first row
+        for col in range(1, worksheet.max_column + 1):
+            header_cell = worksheet.cell(1, col)
+            headers.append(header_cell.value if header_cell.value else f"Column_{col}")
+        
+        # Get data from remaining rows
+        for row in range(2, worksheet.max_row + 1):
+            row_data = []
+            for col in range(1, worksheet.max_column + 1):
+                cell = worksheet.cell(row, col)
+                row_data.append(cell.value)
+            data.append(row_data)
+        
+        df = pd.DataFrame(data, columns=headers)
+        return df
+    
+    def update_worksheet_with_dataframe(self, worksheet, df, start_row=2):
+        """Update worksheet with DataFrame data while preserving formatting"""
+        # Clear existing data (keep headers)
+        for row in range(start_row, worksheet.max_row + 1):
+            for col in range(1, worksheet.max_column + 1):
+                worksheet.cell(row, col).value = None
+        
+        # Add new data
+        for row_idx, (_, row_data) in enumerate(df.iterrows(), start=start_row):
+            for col_idx, (col_name, value) in enumerate(row_data.items(), start=1):
+                cell = worksheet.cell(row_idx, col_idx)
+                cell.value = value
+    
+    def process_with_format_preservation(self, input_file: str, output_file: str, 
+                                       processed_df: pd.DataFrame):
+        """Main function to process while preserving Excel formatting"""
+        try:
+            logger.info("Loading original workbook with formatting...")
+            workbook, worksheet = self.load_workbook_with_formatting(input_file)
+            
+            logger.info("Extracting formatting information...")
+            formatting_data, row_dims, col_dims = self.extract_formatting(worksheet)
+            
+            logger.info("Getting column mappings...")
+            column_mapping = self.get_column_mapping(worksheet)
+            
+            logger.info("Converting original data to DataFrame...")
+            original_df = self.convert_to_dataframe(worksheet)
+            
+            logger.info("Updating worksheet with processed data...")
+            self.update_worksheet_with_dataframe(worksheet, processed_df)
+            
+            logger.info("Reapplying formatting...")
+            self.apply_formatting(worksheet, formatting_data, row_dims, col_dims)
+            
+            # Handle additional rows if processed_df has more rows than original
+            if len(processed_df) > len(original_df):
+                logger.info("Extending formatting for additional rows...")
+                self.extend_formatting_for_new_rows(worksheet, formatting_data, 
+                                                  len(original_df), len(processed_df))
+            
+            logger.info(f"Saving formatted workbook to {output_file}...")
+            # Create output directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            workbook.save(output_file)
+            
+            logger.info("✅ Successfully saved with preserved formatting!")
+            
+        except Exception as e:
+            logger.error(f"Error in format preservation: {e}")
+            raise
+    
+    def extend_formatting_for_new_rows(self, worksheet, formatting_data, 
+                                     original_rows: int, new_rows: int):
+        """Extend formatting for newly added rows"""
+        # Get formatting from the last data row
+        last_data_row = original_rows + 1  # +1 because we start from row 2 (after headers)
+        
+        for new_row in range(original_rows + 2, new_rows + 2):  # +2 for header offset
+            for col in range(1, worksheet.max_column + 1):
+                # Copy formatting from last data row
+                source_coordinate = f"{worksheet.cell(last_data_row, col).column_letter}{last_data_row}"
+                target_coordinate = f"{worksheet.cell(new_row, col).column_letter}{new_row}"
+                
+                if source_coordinate in formatting_data:
+                    source_formats = formatting_data[source_coordinate]
+                    target_cell = worksheet[target_coordinate]
+                    
+                    if source_formats['font']:
+                        target_cell.font = copy(source_formats['font'])
+                    if source_formats['fill']:
+                        target_cell.fill = copy(source_formats['fill'])
+                    if source_formats['border']:
+                        target_cell.border = copy(source_formats['border'])
+                    if source_formats['alignment']:
+                        target_cell.alignment = copy(source_formats['alignment'])
+                    if source_formats['number_format']:
+                        target_cell.number_format = source_formats['number_format']
+
+# Enhanced main processor that uses format preservation
+class EnhancedTestCaseProcessor:
+    def __init__(self):
+        from test_case_ai import TestCaseAI
+        from config import Config
+        
+        self.config = Config()
+        self.ai_processor = TestCaseAI()
+        self.format_processor = FormatPreservingProcessor()
+        
+    def process_file_with_formatting(self, input_file: str, output_file: str = None, 
+                                   batch_size: int = 10):
+        """Process test cases while maintaining Excel formatting"""
+        try:
+            # First, load the file normally to get data for processing
+            logger.info("Loading data for AI processing...")
+            df = pd.read_excel(input_file)
+            
+            # Validate columns
+            required_columns = ['Test Case Description', 'Test Case Steps']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {missing_columns}")
+            
+            # Process data with AI (same as before)
+            logger.info("Processing with AI...")
+            processed_df = self.process_dataframe_with_ai(df, batch_size)
+            
+            # Set output file name if not provided
+            if output_file is None:
+                base_name = os.path.splitext(os.path.basename(input_file))[0]
+                output_file = f"output/{base_name}_formatted_enhanced.xlsx"
+            
+            # Now use format preservation to save
+            logger.info("Applying format preservation...")
+            self.format_processor.process_with_format_preservation(
+                input_file, output_file, processed_df
+            )
+            
+            return processed_df
+            
+        except Exception as e:
+            logger.error(f"Enhanced processing failed: {e}")
+            raise
+    
+    def process_dataframe_with_ai(self, df: pd.DataFrame, batch_size: int = 10):
+        """Process DataFrame with AI enhancement"""
+        processed_df = df.copy()
+        
+        # Add new columns if they don't exist
+        if 'Expected Results' not in processed_df.columns:
+            processed_df['Expected Results'] = ''
+        if 'AI_Processed' not in processed_df.columns:
+            processed_df['AI_Processed'] = False
+        if 'Processing_Timestamp' not in processed_df.columns:
+            processed_df['Processing_Timestamp'] = ''
+        
+        total_rows = len(df)
+        
+        for start_idx in range(0, total_rows, batch_size):
+            end_idx = min(start_idx + batch_size, total_rows)
+            logger.info(f"Processing batch: rows {start_idx} to {end_idx-1}")
+            
+            for idx in range(start_idx, end_idx):
+                try:
+                    original_description = str(processed_df.iloc[idx]['Test Case Description'])
+                    original_steps = str(processed_df.iloc[idx]['Test Case Steps'])
+                    
+                    # Generate rephrased content using AI
+                    rephrased_data = self.ai_processor.rephrase_test_case(
+                        description=original_description,
+                        steps=original_steps
+                    )
+                    
+                    # Update the DataFrame
+                    processed_df.iloc[idx, processed_df.columns.get_loc('Test Case Description')] = rephrased_data['description']
+                    processed_df.iloc[idx, processed_df.columns.get_loc('Test Case Steps')] = rephrased_data['steps']
+                    processed_df.iloc[idx, processed_df.columns.get_loc('Expected Results')] = rephrased_data['expected_results']
+                    processed_df.iloc[idx, processed_df.columns.get_loc('AI_Processed')] = True
+                    processed_df.iloc[idx, processed_df.columns.get_loc('Processing_Timestamp')] = pd.Timestamp.now()
+                    
+                    # Rate limiting
+                    import time
+                    time.sleep(self.config.API_DELAY)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing row {idx}: {e}")
+                    processed_df.iloc[idx, processed_df.columns.get_loc('AI_Processed')] = False
+        
+        return processed_df
+
+def main():
+    """Example usage of format-preserving processor"""
+    processor = EnhancedTestCaseProcessor()
+    
+    input_file = "input/test_cases.xlsx"
+    
+    try:
+        result_df = processor.process_file_with_formatting(
+            input_file=input_file,
+            batch_size=10
+        )
+        print("✅ Processing completed with preserved formatting!")
+        print(f"📊 Processed {len(result_df)} test cases")
+        
+    except Exception as e:
+        print(f"❌ Processing failed: {e}")
+
+if __name__ == "__main__":
+    main()
+
+
+
