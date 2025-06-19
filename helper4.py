@@ -22,7 +22,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Custom JSON Encoder to handle enums and other objects
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Enum):
+            return obj.value
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 app = Flask(__name__)
+app.json_encoder = CustomJSONEncoder
 app.secret_key = os.environ.get('SECRET_KEY', 'jira-ai-secret-key-change-in-production')
 CORS(app)
 
@@ -214,11 +224,24 @@ class JiraAgent:
             # Execute search
             issues_data = self.search_jira_issues(jql_query)
             
+            # Create a simplified, JSON-serializable version of parsed_query
+            parsed_query_simple = {
+                'query_type': parsed_query.query_type.value,
+                'project_key': parsed_query.project_key,
+                'assignee': parsed_query.assignee,
+                'status': parsed_query.status,
+                'epic_key': parsed_query.epic_key,
+                'story_key': parsed_query.story_key,
+                'date_from': parsed_query.date_from,
+                'date_to': parsed_query.date_to,
+                'keywords': parsed_query.keywords
+            }
+            
             return {
                 'success': True,
                 'data': issues_data,
                 'jql_query': jql_query,
-                'parsed_query': asdict(parsed_query)
+                'parsed_query': parsed_query_simple
             }
         except Exception as e:
             logger.error(f"Error processing query: {e}")
@@ -796,7 +819,19 @@ def api_query():
         # Process query
         result = agent.process_user_query(data['query'])
         
-        return jsonify(result)
+        # Ensure the result is JSON serializable
+        try:
+            json.dumps(result)  # Test serialization
+            return jsonify(result)
+        except (TypeError, ValueError) as json_error:
+            logger.error(f"JSON serialization error: {json_error}")
+            # Return a simplified response if serialization fails
+            return jsonify({
+                'success': result.get('success', False),
+                'data': result.get('data', {}),
+                'jql_query': result.get('jql_query', ''),
+                'error': result.get('error', None)
+            })
         
     except Exception as e:
         logger.error(f"API error: {e}")
