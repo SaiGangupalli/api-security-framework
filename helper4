@@ -1,0 +1,1175 @@
+from flask import Flask, render_template, request, jsonify, session
+from flask_cors import CORS
+import requests
+import json
+import re
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, asdict
+from enum import Enum
+import openai
+from datetime import datetime, timedelta
+import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this')
+CORS(app)
+
+class QueryType(Enum):
+    STORY_SEARCH = "story_search"
+    EPIC_SEARCH = "epic_search"
+    STATUS_FILTER = "status_filter"
+    ASSIGNEE_FILTER = "assignee_filter"
+    DATE_RANGE = "date_range"
+    PROJECT_FILTER = "project_filter"
+
+@dataclass
+class JiraQuery:
+    query_type: QueryType
+    project_key: Optional[str] = None
+    assignee: Optional[str] = None
+    status: Optional[str] = None
+    epic_key: Optional[str] = None
+    story_key: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    keywords: Optional[List[str]] = None
+
+class JiraAgent:
+    def __init__(self, jira_url: str, username: str, api_token: str, openai_api_key: str):
+        self.jira_url = jira_url.rstrip('/')
+        self.auth = (username, api_token)
+        self.headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        openai.api_key = openai_api_key
+    
+    def parse_natural_language_query(self, user_query: str) -> JiraQuery:
+        """Use AI to parse natural language queries into structured JiraQuery objects"""
+        prompt = f"""
+        Parse the following user query about Jira tickets and extract relevant information:
+        
+        User Query: "{user_query}"
+        
+        Extract and return a JSON object with the following fields (set to null if not mentioned):
+        - query_type: one of ["story_search", "epic_search", "status_filter", "assignee_filter", "date_range", "project_filter"]
+        - project_key: project abbreviation (e.g., "PROJ", "DEV")
+        - assignee: person's name or username
+        - status: ticket status (e.g., "To Do", "In Progress", "Done")
+        - epic_key: specific epic identifier
+        - story_key: specific story identifier
+        - date_from: start date in YYYY-MM-DD format
+        - date_to: end date in YYYY-MM-DD format
+        - keywords: array of relevant search terms
+        
+        Examples:
+        - "Show me all stories assigned to John" → {{"query_type": "assignee_filter", "assignee": "John"}}
+        - "Find epic PROJ-123" → {{"query_type": "epic_search", "epic_key": "PROJ-123"}}
+        - "Stories in progress for project DEV" → {{"query_type": "status_filter", "project_key": "DEV", "status": "In Progress"}}
+        
+        Return only the JSON object:
+        """
+        
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            
+            parsed_data = json.loads(response.choices[0].message.content)
+            
+            return JiraQuery(
+                query_type=QueryType(parsed_data.get('query_type', 'story_search')),
+                project_key=parsed_data.get('project_key'),
+                assignee=parsed_data.get('assignee'),
+                status=parsed_data.get('status'),
+                epic_key=parsed_data.get('epic_key'),
+                story_key=parsed_data.get('story_key'),
+                date_from=parsed_data.get('date_from'),
+                date_to=parsed_data.get('date_to'),
+                keywords=parsed_data.get('keywords', [])
+            )
+        except Exception as e:
+            logger.error(f"Error parsing query: {e}")
+            return JiraQuery(
+                query_type=QueryType.STORY_SEARCH,
+                keywords=user_query.split()
+            )
+    
+    def build_jql_query(self, parsed_query: JiraQuery) -> str:
+        """Convert parsed query into JQL (Jira Query Language)"""
+        jql_parts = []
+        
+        if parsed_query.project_key:
+            jql_parts.append(f'project = "{parsed_query.project_key}"')
+        
+        if parsed_query.query_type == QueryType.EPIC_SEARCH:
+            jql_parts.append('issuetype = Epic')
+        elif parsed_query.query_type == QueryType.STORY_SEARCH:
+            jql_parts.append('issuetype = Story')
+        
+        if parsed_query.epic_key:
+            jql_parts.append(f'key = "{parsed_query.epic_key}"')
+        if parsed_query.story_key:
+            jql_parts.append(f'key = "{parsed_query.story_key}"')
+        
+        if parsed_query.assignee:
+            jql_parts.append(f'assignee ~ "{parsed_query.assignee}"')
+        
+        if parsed_query.status:
+            jql_parts.append(f'status = "{parsed_query.status}"')
+        
+        if parsed_query.date_from:
+            jql_parts.append(f'created >= "{parsed_query.date_from}"')
+        if parsed_query.date_to:
+            jql_parts.append(f'created <= "{parsed_query.date_to}"')
+        
+        if parsed_query.keywords:
+            keyword_search = ' OR '.join([f'summary ~ "{kw}" OR description ~ "{kw}"' for kw in parsed_query.keywords])
+            jql_parts.append(f'({keyword_search})')
+        
+        return ' AND '.join(jql_parts) if jql_parts else 'project is not EMPTY'
+    
+    def search_jira_issues(self, jql_query: str, max_results: int = 50) -> Dict[str, Any]:
+        """Execute JQL query against Jira API"""
+        search_url = f"{self.jira_url}/rest/api/3/search"
+        
+        payload = {
+            'jql': jql_query,
+            'maxResults': max_results,
+            'fields': [
+                'summary', 'description', 'status', 'assignee', 'reporter',
+                'created', 'updated', 'priority', 'issuetype', 'project',
+                'parent', 'subtasks', 'labels', 'components'
+            ]
+        }
+        
+        try:
+            response = requests.post(
+                search_url,
+                headers=self.headers,
+                auth=self.auth,
+                data=json.dumps(payload),
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error querying Jira: {e}")
+            raise Exception(f"Failed to query Jira: {str(e)}")
+    
+    def process_user_query(self, user_query: str) -> Dict[str, Any]:
+        """Main method to process user queries end-to-end"""
+        logger.info(f"Processing query: '{user_query}'")
+        
+        try:
+            # Parse natural language query
+            parsed_query = self.parse_natural_language_query(user_query)
+            logger.info(f"Parsed query: {parsed_query}")
+            
+            # Build JQL query
+            jql_query = self.build_jql_query(parsed_query)
+            logger.info(f"JQL Query: {jql_query}")
+            
+            # Execute search
+            issues_data = self.search_jira_issues(jql_query)
+            
+            return {
+                'success': True,
+                'data': issues_data,
+                'jql_query': jql_query,
+                'parsed_query': asdict(parsed_query)
+            }
+        except Exception as e:
+            logger.error(f"Error processing query: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+@app.route('/')
+def index():
+    """Serve the main application page"""
+    return render_template('index.html')
+
+@app.route('/api/query', methods=['POST'])
+def api_query():
+    """API endpoint to process Jira queries"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['query', 'jira_url', 'jira_username', 'jira_token', 'openai_key']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
+        
+        # Initialize Jira agent
+        agent = JiraAgent(
+            jira_url=data['jira_url'],
+            username=data['jira_username'],
+            api_token=data['jira_token'],
+            openai_api_key=data['openai_key']
+        )
+        
+        # Process query
+        result = agent.process_user_query(data['query'])
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"API error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy'})
+
+# Create templates directory and index.html
+def create_template():
+    """Create the HTML template"""
+    template_content = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jira AI Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 1200px;
+            height: 90vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0052cc, #2684ff);
+            color: white;
+            padding: 25px 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .config-panel {
+            background: #f8f9ff;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e0e6ff;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .config-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            min-width: 200px;
+        }
+
+        .config-group label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #5e6c84;
+        }
+
+        .config-group input {
+            padding: 10px 12px;
+            border: 2px solid #dfe1e6;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            transition: border-color 0.2s;
+        }
+
+        .config-group input:focus {
+            outline: none;
+            border-color: #0052cc;
+        }
+
+        .toggle-config {
+            background: #0052cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+
+        .toggle-config:hover {
+            background: #003d99;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-container {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+
+        .welcome-message {
+            text-align: center;
+            color: #5e6c84;
+            margin-bottom: 30px;
+        }
+
+        .welcome-message h2 {
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            color: #172b4d;
+        }
+
+        .example-queries {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .example-query {
+            background: #f4f5f7;
+            padding: 15px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 4px solid #0052cc;
+        }
+
+        .example-query:hover {
+            background: #e4edff;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 82, 204, 0.15);
+        }
+
+        .example-query h4 {
+            color: #0052cc;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .message.user {
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .message.assistant {
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 15px 20px;
+            border-radius: 18px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .message.user .message-content {
+            background: #0052cc;
+            color: white;
+            border-bottom-right-radius: 6px;
+        }
+
+        .message.assistant .message-content {
+            background: #f4f5f7;
+            color: #172b4d;
+            border-bottom-left-radius: 6px;
+        }
+
+        .input-container {
+            padding: 25px 30px;
+            background: white;
+            border-top: 1px solid #e0e6ff;
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        #queryInput {
+            width: 100%;
+            padding: 15px 20px;
+            border: 2px solid #dfe1e6;
+            border-radius: 25px;
+            font-size: 1rem;
+            resize: none;
+            min-height: 50px;
+            max-height: 120px;
+            transition: border-color 0.2s;
+        }
+
+        #queryInput:focus {
+            outline: none;
+            border-color: #0052cc;
+        }
+
+        .send-button {
+            background: #0052cc;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            font-size: 1.2rem;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: #003d99;
+            transform: scale(1.05);
+        }
+
+        .send-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #5e6c84;
+            font-style: italic;
+        }
+
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #e0e6ff;
+            border-top: 2px solid #0052cc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        .jira-issue {
+            background: white;
+            border: 1px solid #dfe1e6;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 10px 0;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            transition: transform 0.2s;
+        }
+
+        .jira-issue:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+        }
+
+        .issue-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .issue-key {
+            background: #0052cc;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .issue-status {
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-todo { background: #ddd; color: #666; }
+        .status-progress { background: #fff4e6; color: #ff8b00; }
+        .status-done { background: #e3fcef; color: #00875a; }
+
+        .issue-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #172b4d;
+            margin-bottom: 10px;
+        }
+
+        .issue-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            font-size: 0.9rem;
+            color: #5e6c84;
+        }
+
+        .error-message {
+            background: #ffebe6;
+            border: 1px solid #ff8f73;
+            color: #de350b;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                height: 100vh;
+                border-radius: 0;
+            }
+            
+            .config-panel {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .config-group {
+                min-width: unset;
+            }
+            
+            .example-queries {
+                grid-template-columns: 1fr;
+            }
+            
+            .message-content {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Jira AI Assistant</h1>
+            <p>Ask me anything about your Jira issues and epics in natural language</p>
+        </div>
+
+        <div class="config-panel" id="configPanel">
+            <div class="config-group">
+                <label for="jiraUrl">Jira URL</label>
+                <input type="text" id="jiraUrl" placeholder="https://yourcompany.atlassian.net">
+            </div>
+            <div class="config-group">
+                <label for="jiraUsername">Username</label>
+                <input type="text" id="jiraUsername" placeholder="your-email@company.com">
+            </div>
+            <div class="config-group">
+                <label for="jiraToken">API Token</label>
+                <input type="password" id="jiraToken" placeholder="Your Jira API token">
+            </div>
+            <div class="config-group">
+                <label for="openaiKey">OpenAI API Key</label>
+                <input type="password" id="openaiKey" placeholder="Your OpenAI API key">
+            </div>
+            <button class="toggle-config" onclick="toggleConfig()">Hide Settings</button>
+        </div>
+
+        <div class="main-content">
+            <div class="chat-container" id="chatContainer">
+                <div class="welcome-message">
+                    <h2>Welcome to your Jira AI Assistant! 👋</h2>
+                    <p>Configure your settings above, then ask me about your Jira issues using natural language.</p>
+                    
+                    <div class="example-queries">
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>📋 Find Stories by Assignee</h4>
+                            <p>Show me all stories assigned to John Smith</p>
+                        </div>
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>🐛 Search by Issue Type</h4>
+                            <p>Find all bugs in the DEV project</p>
+                        </div>
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>📈 Status Filtering</h4>
+                            <p>What are the open epics for this sprint?</p>
+                        </div>
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>📅 Date Range Queries</h4>
+                            <p>Show me stories created in the last week</p>
+                        </div>
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>🎯 Epic Stories</h4>
+                            <p>Find epic PROJ-123 and all its stories</p>
+                        </div>
+                        <div class="example-query" onclick="useExampleQuery(this)">
+                            <h4>⚡ Priority Search</h4>
+                            <p>List all high priority issues in progress</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea id="queryInput" placeholder="Ask me about your Jira issues... (e.g., 'Show me all stories assigned to John')" rows="1"></textarea>
+                </div>
+                <button class="send-button" onclick="sendQuery()" id="sendButton">
+                    ➤
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let configVisible = true;
+
+        // Auto-resize textarea
+        document.getElementById('queryInput').addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+
+        // Send query on Enter (but allow Shift+Enter for new lines)
+        document.getElementById('queryInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendQuery();
+            }
+        });
+
+        function toggleConfig() {
+            const panel = document.getElementById('configPanel');
+            const button = panel.querySelector('.toggle-config');
+            
+            if (configVisible) {
+                panel.style.display = 'none';
+                button.textContent = 'Show Settings';
+                configVisible = false;
+            } else {
+                panel.style.display = 'flex';
+                button.textContent = 'Hide Settings';
+                configVisible = true;
+            }
+        }
+
+        function useExampleQuery(element) {
+            const queryText = element.querySelector('p').textContent;
+            document.getElementById('queryInput').value = queryText;
+            sendQuery();
+        }
+
+        function addMessage(content, isUser, isLoading = false) {
+            const chatContainer = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
+            
+            if (isLoading) {
+                messageDiv.innerHTML = `
+                    <div class="message-content loading">
+                        <div class="loading-spinner"></div>
+                        Processing your query...
+                    </div>
+                `;
+                messageDiv.id = 'loadingMessage';
+            } else {
+                messageDiv.innerHTML = `<div class="message-content">${content}</div>`;
+            }
+            
+            // Remove welcome message if it exists
+            const welcomeMessage = chatContainer.querySelector('.welcome-message');
+            if (welcomeMessage) {
+                welcomeMessage.remove();
+            }
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            return messageDiv;
+        }
+
+        function removeLoadingMessage() {
+            const loadingMessage = document.getElementById('loadingMessage');
+            if (loadingMessage) {
+                loadingMessage.remove();
+            }
+        }
+
+        function formatJiraResponse(data) {
+            if (!data.issues || data.issues.length === 0) {
+                return '<div class="error-message">No issues found for your query.</div>';
+            }
+
+            let html = `<div style="margin-bottom: 15px;"><strong>Found ${data.total} issue(s):</strong></div>`;
+            
+            data.issues.slice(0, 10).forEach(issue => {
+                const fields = issue.fields;
+                
+                html += `
+                    <div class="jira-issue">
+                        <div class="issue-header">
+                            <span class="issue-key">${issue.key}</span>
+                            <span class="issue-status status-${getStatusClass(fields.status.name)}">${fields.status.name}</span>
+                        </div>
+                        <div class="issue-title">${fields.summary}</div>
+                        <div class="issue-meta">
+                            <span>📋 ${fields.issuetype.name}</span>
+                            ${fields.assignee ? `<span>👤 ${fields.assignee.displayName}</span>` : '<span>👤 Unassigned</span>'}
+                            ${fields.priority ? `<span>⚡ ${fields.priority.name}</span>` : ''}
+                            <span>📅 ${new Date(fields.created).toLocaleDateString()}</span>
+                        </div>
+                        ${fields.description ? `<div style="margin-top: 10px; color: #5e6c84; font-size: 0.9rem;">${fields.description.substring(0, 200)}${fields.description.length > 200 ? '...' : ''}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            if (data.total > 10) {
+                html += `<div style="text-align: center; color: #5e6c84; margin-top: 15px;">... and ${data.total - 10} more issues</div>`;
+            }
+
+            return html;
+        }
+
+        function getStatusClass(status) {
+            const statusLower = status.toLowerCase();
+            if (statusLower.includes('progress') || statusLower.includes('development')) return 'progress';
+            if (statusLower.includes('done') || statusLower.includes('closed') || statusLower.includes('resolved')) return 'done';
+            return 'todo';
+        }
+
+        async function sendQuery() {
+            const queryInput = document.getElementById('queryInput');
+            const sendButton = document.getElementById('sendButton');
+            const query = queryInput.value.trim();
+            
+            if (!query) return;
+
+            // Validate configuration
+            const jiraUrl = document.getElementById('jiraUrl').value.trim();
+            const jiraUsername = document.getElementById('jiraUsername').value.trim();
+            const jiraToken = document.getElementById('jiraToken').value.trim();
+            const openaiKey = document.getElementById('openaiKey').value.trim();
+
+            if (!jiraUrl || !jiraUsername || !jiraToken || !openaiKey) {
+                addMessage('<div class="error-message">Please configure all settings first (Jira URL, Username, API Token, and OpenAI API Key).</div>', false);
+                return;
+            }
+
+            // Add user message
+            addMessage(query, true);
+            queryInput.value = '';
+            queryInput.style.height = 'auto';
+            
+            // Show loading
+            sendButton.disabled = true;
+            const loadingMessage = addMessage('', false, true);
+
+            try {
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        jira_url: jiraUrl,
+                        jira_username: jiraUsername,
+                        jira_token: jiraToken,
+                        openai_key: openaiKey
+                    })
+                });
+
+                const result = await response.json();
+
+                removeLoadingMessage();
+
+                if (result.success) {
+                    addMessage(formatJiraResponse(result.data), false);
+                } else {
+                    addMessage(`<div class="error-message">Error: ${result.error}</div>`, false);
+                }
+                
+            } catch (error) {
+                removeLoadingMessage();
+                addMessage(`<div class="error-message">Network Error: ${error.message}</div>`, false);
+            } finally {
+                sendButton.disabled = false;
+            }
+        }
+
+        // Initialize with some demo data
+        document.addEventListener('DOMContentLoaded', function() {
+            // Auto-hide config after 3 seconds for demo
+            setTimeout(() => {
+                if (configVisible) {
+                    toggleConfig();
+                }
+            }, 3000);
+        });
+    </script>
+</body>
+</html>'''
+    
+    # Create templates directory if it doesn't exist
+    import os
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
+    
+    # Write the template file
+    with open('templates/index.html', 'w') as f:
+        f.write(template_content)
+
+if __name__ == '__main__':
+    # Create the template file
+    create_template()
+    
+    print("🚀 Starting Jira AI Assistant...")
+    print("📝 Make sure you have the following environment variables set (optional):")
+    print("   - SECRET_KEY: Flask secret key")
+    print("   - FLASK_ENV: Set to 'development' for debug mode")
+    print("\n🔧 Required Python packages:")
+    print("   pip install flask flask-cors requests openai")
+    print("\n🌐 Access the application at: http://localhost:5000")
+    print("\n📋 You'll need:")
+    print("   - Jira URL (e.g., https://yourcompany.atlassian.net)")
+    print("   - Jira username/email")
+    print("   - Jira API token")
+    print("   - OpenAI API key")
+    
+    # Run the Flask app
+    app.run(
+        debug=os.environ.get('FLASK_ENV') == 'development',
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 5000))
+    )
+
+
+
+
+
+
+
+
+Flask==2.3.3
+Flask-CORS==4.0.0
+requests==2.31.0
+openai==0.28.1
+python-dotenv==1.0.0
+gunicorn==21.2.0
+
+
+
+
+
+
+Flask==2.3.3
+Flask-CORS==4.0.0
+requests==2.31.0
+openai==0.28.1
+python-dotenv==1.0.0
+gunicorn==21.2.0
+
+
+
+
+
+
+
+
+# 🤖 Jira AI Assistant
+
+A powerful web application that uses AI to help you query Jira issues and epics using natural language. Built with Flask and integrated with OpenAI for intelligent query parsing.
+
+## ✨ Features
+
+- **Natural Language Processing**: Ask questions in plain English
+- **Intelligent Query Parsing**: AI converts your questions to JQL queries
+- **Beautiful Web Interface**: Modern, responsive chat-like UI
+- **Real-time Results**: Instant formatting of Jira issue data
+- **Flexible Filtering**: Support for assignee, status, date, project filters
+- **Epic Management**: Query epics and their associated stories
+- **Secure**: API credentials entered through secure web interface
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.7+
+- Jira account with API access
+- OpenAI API key
+
+### Installation
+
+1. **Clone or download the application files**
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Set up environment variables** (optional):
+   ```bash
+   cp .env.example .env
+   # Edit .env with your preferred settings
+   ```
+
+4. **Run the application**:
+   ```bash
+   python app.py
+   ```
+
+5. **Open your browser** and go to: `http://localhost:5000`
+
+## 🔧 Configuration
+
+### Jira Setup
+
+1. **Get your Jira API token**:
+   - Go to: `https://id.atlassian.com/manage-profile/security/api-tokens`
+   - Click "Create API token"
+   - Copy the generated token
+
+2. **Find your Jira URL**:
+   - Usually in format: `https://yourcompany.atlassian.net`
+
+### OpenAI Setup
+
+1. **Get your OpenAI API key**:
+   - Go to: `https://platform.openai.com/api-keys`
+   - Create a new API key
+   - Copy the key
+
+### Application Configuration
+
+Enter your credentials in the web interface:
+- **Jira URL**: Your Jira instance URL
+- **Username**: Your Jira email address
+- **API Token**: Your Jira API token
+- **OpenAI API Key**: Your OpenAI API key
+
+## 📝 Example Queries
+
+The AI can understand various types of natural language queries:
+
+### Basic Searches
+- "Show me all stories assigned to John Smith"
+- "Find all bugs in the DEV project"
+- "What issues are in progress?"
+
+### Advanced Filtering
+- "Show me high priority stories created this week"
+- "Find all epics in the MARKETING project"
+- "List stories assigned to me that are overdue"
+
+### Date-based Queries
+- "Stories created in the last month"
+- "Issues updated yesterday"
+- "Show me this week's completed tasks"
+
+### Epic Management
+- "Find epic PROJ-123 and all its stories"
+- "Show me all stories under the authentication epic"
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐    ┌──────────────┐    ┌─────────────┐
+│   Web Browser   │───▶│ Flask Server │───▶│    Jira     │
+│   (Frontend)    │    │   (Backend)  │    │     API     │
+└─────────────────┘    └──────────────┘    └─────────────┘
+                              │
+                              ▼
+                       ┌──────────────┐
+                       │   OpenAI     │
+                       │     API      │
+                       └──────────────┘
+```
+
+## 🔒 Security Features
+
+- **No Storage**: Credentials are only used for the current session
+- **HTTPS Ready**: Can be deployed with SSL/TLS
+- **Input Validation**: All inputs are validated and sanitized
+- **Error Handling**: Comprehensive error handling and logging
+
+## 🚀 Deployment
+
+### Local Development
+```bash
+export FLASK_ENV=development
+python app.py
+```
+
+### Production with Gunicorn
+```bash
+gunicorn --bind 0.0.0.0:5000 app:app
+```
+
+### Docker Deployment
+```dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+EXPOSE 5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+```
+
+### Environment Variables for Production
+```bash
+export SECRET_KEY="your-production-secret-key"
+export FLASK_ENV="production"
+export PORT=5000
+```
+
+## 🛠️ API Endpoints
+
+### `POST /api/query`
+Process natural language Jira queries
+
+**Request Body:**
+```json
+{
+  "query": "Show me all bugs assigned to John",
+  "jira_url": "https://company.atlassian.net",
+  "jira_username": "user@company.com",
+  "jira_token": "api-token",
+  "openai_key": "openai-api-key"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "issues": [...],
+    "total": 5
+  },
+  "jql_query": "project = DEV AND assignee = 'john'",
+  "parsed_query": {...}
+}
+```
+
+### `GET /api/health`
+Health check endpoint
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License.
+
+## 🆘 Troubleshooting
+
+### Common Issues
+
+**"No issues found"**
+- Check your Jira credentials
+- Verify the project keys exist
+- Try a simpler query first
+
+**"OpenAI API Error"**
+- Verify your OpenAI API key
+- Check your OpenAI account has sufficient credits
+- Ensure you're using a supported model
+
+**"Connection Error"**
+- Check your internet connection
+- Verify Jira URL is correct
+- Ensure Jira instance is accessible
+
+### Debug Mode
+
+Run with debug enabled:
+```bash
+export FLASK_ENV=development
+python app.py
+```
+
+This will show detailed error messages and enable hot reloading.
+
+## 📞 Support
+
+For issues and questions:
+1. Check the troubleshooting section
+2. Review the example queries
+3. Verify your API credentials
+4. Check the browser console for errors
+
+---
+
+**Happy Jira querying! 🎉**
