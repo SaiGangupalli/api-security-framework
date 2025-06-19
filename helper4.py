@@ -1,4 +1,7 @@
-from flask import Flask, render_template, request, jsonify, session
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from flask import Flask, render_template_string, request, jsonify
 from flask_cors import CORS
 import requests
 import json
@@ -20,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this')
+app.secret_key = os.environ.get('SECRET_KEY', 'jira-ai-secret-key-change-in-production')
 CORS(app)
 
 # Get configuration from environment variables
@@ -40,7 +43,13 @@ required_env_vars = {
 missing_vars = [var for var, value in required_env_vars.items() if not value]
 if missing_vars:
     logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-    raise ValueError(f"Please set the following environment variables: {', '.join(missing_vars)}")
+    print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+    print("📝 Please create a .env file with the required variables:")
+    print("   JIRA_URL=https://yourcompany.atlassian.net")
+    print("   JIRA_USERNAME=your-email@company.com")
+    print("   JIRA_TOKEN=your-jira-api-token")
+    print("   OPENAI_API_KEY=your-openai-api-key")
+    exit(1)
 
 logger.info("✅ All required environment variables are configured")
 
@@ -93,9 +102,9 @@ class JiraAgent:
         - keywords: array of relevant search terms
         
         Examples:
-        - "Show me all stories assigned to John" → {{"query_type": "assignee_filter", "assignee": "John"}}
-        - "Find epic PROJ-123" → {{"query_type": "epic_search", "epic_key": "PROJ-123"}}
-        - "Stories in progress for project DEV" → {{"query_type": "status_filter", "project_key": "DEV", "status": "In Progress"}}
+        - "Show me all stories assigned to John" -> {{"query_type": "assignee_filter", "assignee": "John"}}
+        - "Find epic PROJ-123" -> {{"query_type": "epic_search", "epic_key": "PROJ-123"}}
+        - "Stories in progress for project DEV" -> {{"query_type": "status_filter", "project_key": "DEV", "status": "In Progress"}}
         
         Return only the JSON object:
         """
@@ -218,53 +227,8 @@ class JiraAgent:
                 'error': str(e)
             }
 
-@app.route('/')
-def index():
-    """Serve the main application page"""
-    return render_template('index.html')
-
-@app.route('/api/query', methods=['POST'])
-def api_query():
-    """API endpoint to process Jira queries"""
-    try:
-        data = request.get_json()
-        
-        # Only require the query from the request
-        if not data.get('query'):
-            return jsonify({
-                'success': False,
-                'error': 'Missing required field: query'
-            }), 400
-        
-        # Initialize Jira agent with environment variables
-        agent = JiraAgent(
-            jira_url=JIRA_URL,
-            username=JIRA_USERNAME,
-            api_token=JIRA_TOKEN,
-            openai_api_key=OPENAI_API_KEY
-        )
-        
-        # Process query
-        result = agent.process_user_query(data['query'])
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"API error: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy'})
-
-# Create templates directory and index.html
-def create_template():
-    """Create the HTML template with proper encoding"""
-    template_content = '''<!DOCTYPE html>
+# HTML Template as string to avoid file creation issues
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -801,573 +765,130 @@ def create_template():
         }
     </script>
 </body>
-</html>'''
+</html>"""
 
-        .main-content {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
+@app.route('/')
+def index():
+    """Serve the main application page"""
+    return render_template_string(HTML_TEMPLATE)
 
-        .chat-container {
-            flex: 1;
-            padding: 30px;
-            overflow-y: auto;
-            scroll-behavior: smooth;
-        }
-
-        .welcome-message {
-            text-align: center;
-            color: #5e6c84;
-            margin-bottom: 30px;
-        }
-
-        .welcome-message h2 {
-            font-size: 1.5rem;
-            margin-bottom: 15px;
-            color: #172b4d;
-        }
-
-        .example-queries {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
-        }
-
-        .example-query {
-            background: #f4f5f7;
-            padding: 15px;
-            border-radius: 12px;
-            cursor: pointer;
-            transition: all 0.2s;
-            border-left: 4px solid #0052cc;
-        }
-
-        .example-query:hover {
-            background: #e4edff;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 82, 204, 0.15);
-        }
-
-        .example-query h4 {
-            color: #0052cc;
-            margin-bottom: 5px;
-            font-size: 0.9rem;
-        }
-
-        .message {
-            margin-bottom: 20px;
-            animation: fadeIn 0.3s ease-in;
-        }
-
-        .message.user {
-            display: flex;
-            justify-content: flex-end;
-        }
-
-        .message.assistant {
-            display: flex;
-            justify-content: flex-start;
-        }
-
-        .message-content {
-            max-width: 70%;
-            padding: 15px 20px;
-            border-radius: 18px;
-            font-size: 0.95rem;
-            line-height: 1.5;
-        }
-
-        .message.user .message-content {
-            background: #0052cc;
-            color: white;
-            border-bottom-right-radius: 6px;
-        }
-
-        .message.assistant .message-content {
-            background: #f4f5f7;
-            color: #172b4d;
-            border-bottom-left-radius: 6px;
-        }
-
-        .input-container {
-            padding: 25px 30px;
-            background: white;
-            border-top: 1px solid #e0e6ff;
-            display: flex;
-            gap: 15px;
-            align-items: flex-end;
-        }
-
-        .input-wrapper {
-            flex: 1;
-            position: relative;
-        }
-
-        #queryInput {
-            width: 100%;
-            padding: 15px 20px;
-            border: 2px solid #dfe1e6;
-            border-radius: 25px;
-            font-size: 1rem;
-            resize: none;
-            min-height: 50px;
-            max-height: 120px;
-            transition: border-color 0.2s;
-        }
-
-        #queryInput:focus {
-            outline: none;
-            border-color: #0052cc;
-        }
-
-        .send-button {
-            background: #0052cc;
-            color: white;
-            border: none;
-            border-radius: 50%;
-            width: 50px;
-            height: 50px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.2s;
-            font-size: 1.2rem;
-        }
-
-        .send-button:hover:not(:disabled) {
-            background: #003d99;
-            transform: scale(1.05);
-        }
-
-        .send-button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-
-        .loading {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            color: #5e6c84;
-            font-style: italic;
-        }
-
-        .loading-spinner {
-            width: 20px;
-            height: 20px;
-            border: 2px solid #e0e6ff;
-            border-top: 2px solid #0052cc;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-
-        .jira-issue {
-            background: white;
-            border: 1px solid #dfe1e6;
-            border-radius: 12px;
-            padding: 20px;
-            margin: 10px 0;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-            transition: transform 0.2s;
-        }
-
-        .jira-issue:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-        }
-
-        .issue-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 15px;
-        }
-
-        .issue-key {
-            background: #0052cc;
-            color: white;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 0.9rem;
-        }
-
-        .issue-status {
-            padding: 4px 12px;
-            border-radius: 15px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
-
-        .status-todo { background: #ddd; color: #666; }
-        .status-progress { background: #fff4e6; color: #ff8b00; }
-        .status-done { background: #e3fcef; color: #00875a; }
-
-        .issue-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: #172b4d;
-            margin-bottom: 10px;
-        }
-
-        .issue-meta {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 15px;
-            font-size: 0.9rem;
-            color: #5e6c84;
-        }
-
-        .error-message {
-            background: #ffebe6;
-            border: 1px solid #ff8f73;
-            color: #de350b;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 10px 0;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        @media (max-width: 768px) {
-            .container {
-                height: 100vh;
-                border-radius: 0;
-            }
-            
-            .config-panel {
-                flex-direction: column;
-                align-items: stretch;
-            }
-            
-            .config-group {
-                min-width: unset;
-            }
-            
-            .example-queries {
-                grid-template-columns: 1fr;
-            }
-            
-            .message-content {
-                max-width: 85%;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🤖 Jira AI Assistant</h1>
-            <p>Ask me anything about your Jira issues and epics in natural language</p>
-        </div>
-
-        <div class="config-panel" id="configPanel">
-            <div class="config-group">
-                <label for="jiraUrl">Jira URL</label>
-                <input type="text" id="jiraUrl" placeholder="https://yourcompany.atlassian.net">
-            </div>
-            <div class="config-group">
-                <label for="jiraUsername">Username</label>
-                <input type="text" id="jiraUsername" placeholder="your-email@company.com">
-            </div>
-            <div class="config-group">
-                <label for="jiraToken">API Token</label>
-                <input type="password" id="jiraToken" placeholder="Your Jira API token">
-            </div>
-            <div class="config-group">
-                <label for="openaiKey">OpenAI API Key</label>
-                <input type="password" id="openaiKey" placeholder="Your OpenAI API key">
-            </div>
-            <button class="toggle-config" onclick="toggleConfig()">Hide Settings</button>
-        </div>
-
-        <div class="main-content">
-            <div class="chat-container" id="chatContainer">
-                <div class="welcome-message">
-                    <h2>Welcome to your Jira AI Assistant! 👋</h2>
-                    <p>Configure your settings above, then ask me about your Jira issues using natural language.</p>
-                    
-                    <div class="example-queries">
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>📋 Find Stories by Assignee</h4>
-                            <p>Show me all stories assigned to John Smith</p>
-                        </div>
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>🐛 Search by Issue Type</h4>
-                            <p>Find all bugs in the DEV project</p>
-                        </div>
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>📈 Status Filtering</h4>
-                            <p>What are the open epics for this sprint?</p>
-                        </div>
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>📅 Date Range Queries</h4>
-                            <p>Show me stories created in the last week</p>
-                        </div>
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>🎯 Epic Stories</h4>
-                            <p>Find epic PROJ-123 and all its stories</p>
-                        </div>
-                        <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>⚡ Priority Search</h4>
-                            <p>List all high priority issues in progress</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="input-container">
-                <div class="input-wrapper">
-                    <textarea id="queryInput" placeholder="Ask me about your Jira issues... (e.g., 'Show me all stories assigned to John')" rows="1"></textarea>
-                </div>
-                <button class="send-button" onclick="sendQuery()" id="sendButton">
-                    ➤
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        let configVisible = true;
-
-        // Auto-resize textarea
-        document.getElementById('queryInput').addEventListener('input', function() {
-            this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-        });
-
-        // Send query on Enter (but allow Shift+Enter for new lines)
-        document.getElementById('queryInput').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendQuery();
-            }
-        });
-
-        function toggleConfig() {
-            const panel = document.getElementById('configPanel');
-            const button = panel.querySelector('.toggle-config');
-            
-            if (configVisible) {
-                panel.style.display = 'none';
-                button.textContent = 'Show Settings';
-                configVisible = false;
-            } else {
-                panel.style.display = 'flex';
-                button.textContent = 'Hide Settings';
-                configVisible = true;
-            }
-        }
-
-        function useExampleQuery(element) {
-            const queryText = element.querySelector('p').textContent;
-            document.getElementById('queryInput').value = queryText;
-            sendQuery();
-        }
-
-        function addMessage(content, isUser, isLoading = false) {
-            const chatContainer = document.getElementById('chatContainer');
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
-            
-            if (isLoading) {
-                messageDiv.innerHTML = `
-                    <div class="message-content loading">
-                        <div class="loading-spinner"></div>
-                        Processing your query...
-                    </div>
-                `;
-                messageDiv.id = 'loadingMessage';
-            } else {
-                messageDiv.innerHTML = `<div class="message-content">${content}</div>`;
-            }
-            
-            // Remove welcome message if it exists
-            const welcomeMessage = chatContainer.querySelector('.welcome-message');
-            if (welcomeMessage) {
-                welcomeMessage.remove();
-            }
-            
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-            
-            return messageDiv;
-        }
-
-        function removeLoadingMessage() {
-            const loadingMessage = document.getElementById('loadingMessage');
-            if (loadingMessage) {
-                loadingMessage.remove();
-            }
-        }
-
-        function formatJiraResponse(data) {
-            if (!data.issues || data.issues.length === 0) {
-                return '<div class="error-message">No issues found for your query.</div>';
-            }
-
-            let html = `<div style="margin-bottom: 15px;"><strong>Found ${data.total} issue(s):</strong></div>`;
-            
-            data.issues.slice(0, 10).forEach(issue => {
-                const fields = issue.fields;
-                
-                html += `
-                    <div class="jira-issue">
-                        <div class="issue-header">
-                            <span class="issue-key">${issue.key}</span>
-                            <span class="issue-status status-${getStatusClass(fields.status.name)}">${fields.status.name}</span>
-                        </div>
-                        <div class="issue-title">${fields.summary}</div>
-                        <div class="issue-meta">
-                            <span>📋 ${fields.issuetype.name}</span>
-                            ${fields.assignee ? `<span>👤 ${fields.assignee.displayName}</span>` : '<span>👤 Unassigned</span>'}
-                            ${fields.priority ? `<span>⚡ ${fields.priority.name}</span>` : ''}
-                            <span>📅 ${new Date(fields.created).toLocaleDateString()}</span>
-                        </div>
-                        ${fields.description ? `<div style="margin-top: 10px; color: #5e6c84; font-size: 0.9rem;">${fields.description.substring(0, 200)}${fields.description.length > 200 ? '...' : ''}</div>` : ''}
-                    </div>
-                `;
-            });
-
-            if (data.total > 10) {
-                html += `<div style="text-align: center; color: #5e6c84; margin-top: 15px;">... and ${data.total - 10} more issues</div>`;
-            }
-
-            return html;
-        }
-
-        function getStatusClass(status) {
-            const statusLower = status.toLowerCase();
-            if (statusLower.includes('progress') || statusLower.includes('development')) return 'progress';
-            if (statusLower.includes('done') || statusLower.includes('closed') || statusLower.includes('resolved')) return 'done';
-            return 'todo';
-        }
-
-        async function sendQuery() {
-            const queryInput = document.getElementById('queryInput');
-            const sendButton = document.getElementById('sendButton');
-            const query = queryInput.value.trim();
-            
-            if (!query) return;
-
-            // Validate configuration
-            const jiraUrl = document.getElementById('jiraUrl').value.trim();
-            const jiraUsername = document.getElementById('jiraUsername').value.trim();
-            const jiraToken = document.getElementById('jiraToken').value.trim();
-            const openaiKey = document.getElementById('openaiKey').value.trim();
-
-            if (!jiraUrl || !jiraUsername || !jiraToken || !openaiKey) {
-                addMessage('<div class="error-message">Please configure all settings first (Jira URL, Username, API Token, and OpenAI API Key).</div>', false);
-                return;
-            }
-
-            // Add user message
-            addMessage(query, true);
-            queryInput.value = '';
-            queryInput.style.height = 'auto';
-            
-            // Show loading
-            sendButton.disabled = true;
-            const loadingMessage = addMessage('', false, true);
-
-            try {
-                const response = await fetch('/api/query', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        query: query,
-                        jira_url: jiraUrl,
-                        jira_username: jiraUsername,
-                        jira_token: jiraToken,
-                        openai_key: openaiKey
-                    })
-                });
-
-                const result = await response.json();
-
-                removeLoadingMessage();
-
-                if (result.success) {
-                    addMessage(formatJiraResponse(result.data), false);
-                } else {
-                    addMessage(`<div class="error-message">Error: ${result.error}</div>`, false);
-                }
-                
-            } catch (error) {
-                removeLoadingMessage();
-                addMessage(`<div class="error-message">Network Error: ${error.message}</div>`, false);
-            } finally {
-                sendButton.disabled = false;
-            }
-        }
-
-        // Initialize with some demo data
-        document.addEventListener('DOMContentLoaded', function() {
-            // Auto-hide config after 3 seconds for demo
-            setTimeout(() => {
-                if (configVisible) {
-                    toggleConfig();
-                }
-            }, 3000);
-        });
-    </script>
-</body>
-</html>'''
-    
-    # Create templates directory if it doesn't exist
-    import os
-    if not os.path.exists('templates'):
-        os.makedirs('templates')
-        print("📁 Created templates directory")
-    
-    # Write the template file with proper encoding
+@app.route('/api/query', methods=['POST'])
+def api_query():
+    """API endpoint to process Jira queries"""
     try:
-        with open('templates/index.html', 'w', encoding='utf-8') as f:
-            f.write(template_content)
-        print("✅ Template file created successfully")
+        data = request.get_json()
+        
+        # Only require the query from the request
+        if not data or not data.get('query'):
+            return jsonify({
+                'success': False,
+                'error': 'Missing required field: query'
+            }), 400
+        
+        # Initialize Jira agent with environment variables
+        agent = JiraAgent(
+            jira_url=JIRA_URL,
+            username=JIRA_USERNAME,
+            api_token=JIRA_TOKEN,
+            openai_api_key=OPENAI_API_KEY
+        )
+        
+        # Process query
+        result = agent.process_user_query(data['query'])
+        
+        return jsonify(result)
+        
     except Exception as e:
-        print(f"❌ Error creating template: {e}")
-        # Fallback: create a simple template without emojis
-        simple_template = template_content.encode('ascii', 'ignore').decode('ascii')
-        with open('templates/index.html', 'w', encoding='utf-8') as f:
-            f.write(simple_template)
-        print("✅ Fallback template created without special characters")
+        logger.error(f"API error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'jira_url': JIRA_URL,
+        'jira_username': JIRA_USERNAME,
+        'openai_configured': bool(OPENAI_API_KEY)
+    })
+
+@app.route('/api/test', methods=['GET'])
+def test_connection():
+    """Test Jira connection"""
+    try:
+        agent = JiraAgent(
+            jira_url=JIRA_URL,
+            username=JIRA_USERNAME,
+            api_token=JIRA_TOKEN,
+            openai_api_key=OPENAI_API_KEY
+        )
+        
+        # Test with a simple query
+        test_jql = "project is not EMPTY ORDER BY created DESC"
+        search_url = f"{JIRA_URL}/rest/api/3/search"
+        
+        payload = {
+            'jql': test_jql,
+            'maxResults': 1,
+            'fields': ['summary', 'status', 'issuetype', 'project']
+        }
+        
+        response = requests.post(
+            search_url,
+            headers=agent.headers,
+            auth=agent.auth,
+            data=json.dumps(payload),
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Jira connection successful',
+            'total_issues': result.get('total', 0)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Jira connection failed: {str(e)}'
+        }), 500
 
 if __name__ == '__main__':
-    # Create the template file
-    create_template()
-    
     print("🚀 Starting Jira AI Assistant...")
-    print("📝 Make sure you have the following environment variables set (optional):")
-    print("   - SECRET_KEY: Flask secret key")
-    print("   - FLASK_ENV: Set to 'development' for debug mode")
-    print("\n🔧 Required Python packages:")
-    print("   pip install flask flask-cors requests openai")
-    print("\n🌐 Access the application at: http://localhost:5000")
-    print("\n📋 You'll need:")
-    print("   - Jira URL (e.g., https://yourcompany.atlassian.net)")
-    print("   - Jira username/email")
-    print("   - Jira API token")
-    print("   - OpenAI API key")
+    print("=" * 60)
+    print(f"📊 Configuration:")
+    print(f"   - Jira URL: {JIRA_URL}")
+    print(f"   - Jira Username: {JIRA_USERNAME}")
+    print(f"   - OpenAI API Key: {'✅ Configured' if OPENAI_API_KEY else '❌ Missing'}")
+    print("=" * 60)
+    print("🔧 Required Python packages:")
+    print("   pip install flask flask-cors requests openai python-dotenv")
+    print("=" * 60)
+    print("🌐 Server will start at: http://localhost:5000")
+    print("🔍 Health check: http://localhost:5000/api/health")
+    print("🧪 Test connection: http://localhost:5000/api/test")
+    print("=" * 60)
+    print("📋 Example queries to try:")
+    print("   - 'Show me all stories assigned to John Smith'")
+    print("   - 'Find all bugs in the DEV project'")
+    print("   - 'What are the high priority issues in progress?'")
+    print("   - 'Show me stories created in the last week'")
+    print("=" * 60)
     
     # Run the Flask app
-    app.run(
-        debug=os.environ.get('FLASK_ENV') == 'development',
-        host='0.0.0.0',
-        port=int(os.environ.get('PORT', 5000))
-    )
+    try:
+        app.run(
+            debug=os.environ.get('FLASK_ENV') == 'development',
+            host='0.0.0.0',
+            port=int(os.environ.get('PORT', 5000))
+        )
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down Jira AI Assistant...")
+    except Exception as e:
+        print(f"❌ Error starting server: {e}")
+        print("💡 Make sure port 5000 is available or set PORT environment variable")
