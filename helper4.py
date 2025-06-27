@@ -855,10 +855,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #0052cc;
         }
 
-        .metric-label {
-            font-size: 0.9rem;
-            color: #5e6c84;
-            margin-top: 5px;
+        .error-message {
+            background: #ffebe6;
+            border: 1px solid #ff8f73;
+            color: #de350b;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        .issue-details {
+            border-left: 4px solid #0052cc;
+        }
+
+        .security-keywords {
+            background: #fff4e6;
+            border: 1px solid #ffab00;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        .security-keywords strong {
+            color: #ff8b00;
         }
 
         @keyframes fadeIn {
@@ -928,11 +947,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </div>
                         <div class="example-query" onclick="useExampleQuery(this)">
                             <h4>🔒 Security Analysis</h4>
-                            <p>Analyze project PROJ for security risks</p>
+                            <p>Analyze issue PROJ-123 for security risks</p>
                         </div>
                         <div class="example-query" onclick="showSecurityForm()">
                             <h4>🛡️ Fraud & Security Impact</h4>
-                            <p>Get security analysis for a project</p>
+                            <p>Get security analysis for an issue</p>
                         </div>
                     </div>
                 </div>
@@ -1061,11 +1080,136 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="security-form">
                     <h3>🛡️ Fraud & Security Impact Analysis</h3>
                     <p style="margin-bottom: 20px; color: #5e6c84;">
-                        Enter a Jira project key to get a comprehensive security risk assessment in simple terms.
+                        Enter a Jira issue key to get a comprehensive security risk assessment in simple terms.
                     </p>
                     <div class="form-group">
-                        <label for="projectKey">Project Key:</label>
-                        <input type="text" id="projectKey" placeholder="e.g., PROJ, DEV, SEC" maxlength="10">
+                        <label for="issueKey">Issue Key:</label>
+                        <input type="text" id="issueKey" placeholder="e.g., PROJ-123, DEV-456, SEC-789" maxlength="20">
+                    </div>
+                    <button class="analyze-button" onclick="analyzeIssueSecurity()" id="analyzeBtn">
+                        🔍 Analyze Security Impact
+                    </button>
+                </div>
+            `;
+            
+            chatContainer.innerHTML = securityForm;
+            document.getElementById('issueKey').focus();
+            
+            // Allow Enter key to submit
+            document.getElementById('issueKey').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    analyzeIssueSecurity();
+                }
+            });
+        }
+
+        async function analyzeIssueSecurity() {
+            const issueKey = document.getElementById('issueKey').value.trim().toUpperCase();
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            
+            if (!issueKey) {
+                alert('Please enter an issue key');
+                return;
+            }
+            
+            // Show loading state
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerHTML = '🔄 Analyzing...';
+            
+            try {
+                const response = await fetch('/api/security-analysis', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        issue_key: issueKey
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    displaySecurityResults(result);
+                } else {
+                    addMessage(`<div class="error-message">Error: ${result.error}</div>`, false);
+                }
+                
+            } catch (error) {
+                addMessage(`<div class="error-message">Network Error: ${error.message}</div>`, false);
+            } finally {
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerHTML = '🔍 Analyze Security Impact';
+            }
+        }
+
+        function displaySecurityResults(result) {
+            const riskLevel = result.summary.includes('CRITICAL') ? 'high' : 
+                            result.summary.includes('HIGH RISK') ? 'high' :
+                            result.summary.includes('MEDIUM RISK') ? 'medium' : 'low';
+            
+            const issue = result.issue_info;
+            const metrics = result.metrics;
+            
+            const securityHtml = `
+                <div class="security-result">
+                    <h3 style="color: #0052cc; margin-bottom: 15px;">
+                        🛡️ Security Analysis: ${issue.key}
+                    </h3>
+                    
+                    <div class="issue-details" style="background: #f8f9ff; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                        <h4 style="color: #172b4d; margin-bottom: 10px;">${issue.summary}</h4>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size: 0.9rem; color: #5e6c84;">
+                            <div><strong>Type:</strong> ${issue.type}</div>
+                            <div><strong>Status:</strong> ${issue.status}</div>
+                            <div><strong>Priority:</strong> ${issue.priority}</div>
+                            <div><strong>Assignee:</strong> ${issue.assignee}</div>
+                        </div>
+                    </div>
+                    
+                    <div class="risk-level risk-${riskLevel}">
+                        ${result.summary}
+                    </div>
+                    
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-value">${metrics.is_security_related ? 'YES' : 'NO'}</div>
+                            <div class="metric-label">Security Related</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${metrics.is_high_priority ? 'YES' : 'NO'}</div>
+                            <div class="metric-label">High Priority</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${metrics.related_issues_count}</div>
+                            <div class="metric-label">Related Issues</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${metrics.related_security_count}</div>
+                            <div class="metric-label">Related Security</div>
+                        </div>
+                    </div>
+                    
+                    <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; margin-top: 20px; white-space: pre-line;">
+                        ${result.analysis}
+                    </div>
+                    
+                    ${metrics.security_keywords_found.length > 0 ? `
+                    <div style="margin-top: 15px; padding: 15px; background: #fff4e6; border-radius: 8px;">
+                        <strong>🔍 Security Keywords Found:</strong> ${metrics.security_keywords_found.join(', ')}
+                    </div>
+                    ` : ''}
+                    
+                    <div style="margin-top: 20px; text-align: center;">
+                        <button onclick="showSecurityForm()" style="background: #0052cc; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer;">
+                            🔍 Analyze Another Issue
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            addMessage(securityHtml, false);
+        }.g., PROJ, DEV, SEC" maxlength="10">
                     </div>
                     <button class="analyze-button" onclick="analyzeProjectSecurity()" id="analyzeBtn">
                         🔍 Analyze Security Impact
