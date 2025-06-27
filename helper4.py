@@ -93,6 +93,204 @@ class JiraAgent:
         }
         openai.api_key = openai_api_key
     
+    def get_project_issues(self, project_key: str) -> Dict[str, Any]:
+        """Get all issues from a specific project"""
+        search_url = f"{self.jira_url}/rest/api/3/search"
+        
+        payload = {
+            'jql': f'project = "{project_key}" ORDER BY created DESC',
+            'maxResults': 100,  # Analyze recent 100 issues
+            'fields': [
+                'summary', 'description', 'status', 'assignee', 'reporter',
+                'created', 'updated', 'priority', 'issuetype', 'labels',
+                'components', 'fixVersions'
+            ]
+        }
+        
+        try:
+            response = requests.post(
+                search_url,
+                headers=self.headers,
+                auth=self.auth,
+                data=json.dumps(payload),
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error querying Jira project {project_key}: {e}")
+            raise Exception(f"Failed to fetch project data: {str(e)}")
+    
+    def analyze_security_impact(self, project_key: str) -> Dict[str, Any]:
+        """Analyze project for fraud and security impact"""
+        try:
+            # Get project issues
+            issues_data = self.get_project_issues(project_key)
+            issues = issues_data.get('issues', [])
+            
+            if not issues:
+                return {
+                    'success': False,
+                    'error': f'No issues found in project {project_key}'
+                }
+            
+            # Prepare data for AI analysis
+            project_summary = self._prepare_project_summary(issues, project_key)
+            
+            # Get AI analysis
+            security_analysis = self._get_ai_security_analysis(project_summary, project_key)
+            
+            # Calculate metrics
+            metrics = self._calculate_security_metrics(issues)
+            
+            return {
+                'success': True,
+                'project_key': project_key,
+                'total_issues': len(issues),
+                'analysis': security_analysis,
+                'metrics': metrics,
+                'summary': self._generate_executive_summary(security_analysis, metrics)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing project {project_key}: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _prepare_project_summary(self, issues: List[Dict], project_key: str) -> str:
+        """Prepare a summary of project issues for AI analysis"""
+        issue_summaries = []
+        security_keywords = ['security', 'fraud', 'vulnerability', 'authentication', 'authorization', 
+                           'encryption', 'password', 'token', 'access', 'permission', 'breach', 
+                           'attack', 'malware', 'phishing', 'sql injection', 'xss', 'csrf']
+        
+        for issue in issues[:50]:  # Analyze top 50 issues
+            fields = issue['fields']
+            summary = fields.get('summary', '')
+            description = fields.get('description', '')
+            issue_type = fields.get('issuetype', {}).get('name', '')
+            priority = fields.get('priority', {}).get('name', '')
+            status = fields.get('status', {}).get('name', '')
+            
+            # Check if issue is security-related
+            is_security_related = any(keyword in summary.lower() or 
+                                    (description and keyword in description.lower()) 
+                                    for keyword in security_keywords)
+            
+            issue_summaries.append({
+                'key': issue['key'],
+                'summary': summary,
+                'type': issue_type,
+                'priority': priority,
+                'status': status,
+                'security_related': is_security_related
+            })
+        
+        return json.dumps(issue_summaries, indent=2)
+    
+    def _get_ai_security_analysis(self, project_summary: str, project_key: str) -> str:
+        """Get AI-powered security analysis"""
+        prompt = f"""
+        You are a cybersecurity expert analyzing a Jira project for fraud and security risks.
+        
+        Project: {project_key}
+        Project Issues Summary: {project_summary}
+        
+        Provide a SHORT and CRISP fraud & security impact analysis in LAYMAN'S TERMS (non-technical language).
+        
+        Focus on:
+        1. Security Risks (2-3 sentences max)
+        2. Fraud Potential (2-3 sentences max) 
+        3. Immediate Actions (2-3 bullet points)
+        4. Risk Level (Low/Medium/High with 1 sentence explanation)
+        
+        Keep it under 150 words total. Use simple language that a business manager would understand.
+        Avoid technical jargon. Be direct and actionable.
+        
+        Format your response as:
+        **Security Risks:** [explanation]
+        **Fraud Potential:** [explanation]  
+        **Immediate Actions:**
+        • [action 1]
+        • [action 2]
+        • [action 3]
+        **Risk Level:** [level] - [reason]
+        """
+        
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300
+            )
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"Error getting AI analysis: {e}")
+            return "Unable to generate AI analysis. Please check OpenAI configuration."
+    
+    def _calculate_security_metrics(self, issues: List[Dict]) -> Dict[str, Any]:
+        """Calculate security-related metrics"""
+        total_issues = len(issues)
+        security_related = 0
+        high_priority = 0
+        open_issues = 0
+        
+        security_keywords = ['security', 'fraud', 'vulnerability', 'authentication', 'authorization']
+        
+        for issue in issues:
+            fields = issue['fields']
+            summary = fields.get('summary', '').lower()
+            description = fields.get('description', '').lower() if fields.get('description') else ''
+            priority = fields.get('priority', {}).get('name', '')
+            status = fields.get('status', {}).get('name', '')
+            
+            # Check if security-related
+            if any(keyword in summary or keyword in description for keyword in security_keywords):
+                security_related += 1
+            
+            # Check priority
+            if priority in ['High', 'Critical', 'Highest']:
+                high_priority += 1
+            
+            # Check if open
+            if status not in ['Done', 'Closed', 'Resolved']:
+                open_issues += 1
+        
+        return {
+            'total_issues': total_issues,
+            'security_related': security_related,
+            'security_percentage': round((security_related / total_issues) * 100, 1) if total_issues > 0 else 0,
+            'high_priority': high_priority,
+            'open_issues': open_issues,
+            'completion_rate': round(((total_issues - open_issues) / total_issues) * 100, 1) if total_issues > 0 else 0
+        }
+    
+    def _generate_executive_summary(self, analysis: str, metrics: Dict) -> str:
+        """Generate a one-line executive summary"""
+        risk_indicators = ['High', 'Critical', 'Urgent', 'Immediate']
+        is_high_risk = any(indicator in analysis for indicator in risk_indicators)
+        
+        security_pct = metrics['security_percentage']
+        
+        if is_high_risk or security_pct > 20:
+            return f"⚠️ HIGH RISK: {security_pct}% security-related issues detected - immediate attention required"
+        elif security_pct > 10:
+            return f"⚡ MEDIUM RISK: {security_pct}% security-related issues - monitoring recommended"
+        else:
+            return f"✅ LOW RISK: {security_pct}% security-related issues - standard monitoring sufficient"
+    def __init__(self, jira_url: str, username: str, api_token: str, openai_api_key: str):
+        self.jira_url = jira_url.rstrip('/')
+        self.auth = (username, api_token)
+        self.headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        openai.api_key = openai_api_key
+    
     def parse_natural_language_query(self, user_query: str) -> JiraQuery:
         """Use AI to parse natural language queries into structured JiraQuery objects"""
         prompt = f"""
@@ -550,13 +748,117 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #5e6c84;
         }
 
-        .error-message {
-            background: #ffebe6;
-            border: 1px solid #ff8f73;
-            color: #de350b;
+        .security-form {
+            background: #fff4e6;
+            border: 2px solid #ff8b00;
+            border-radius: 15px;
+            padding: 25px;
+            margin: 20px 0;
+            box-shadow: 0 4px 12px rgba(255, 139, 0, 0.15);
+        }
+
+        .security-form h3 {
+            color: #ff8b00;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            color: #172b4d;
+            margin-bottom: 5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #dfe1e6;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #ff8b00;
+        }
+
+        .analyze-button {
+            background: #ff8b00;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .analyze-button:hover:not(:disabled) {
+            background: #cc6f00;
+            transform: translateY(-1px);
+        }
+
+        .analyze-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .security-result {
+            background: white;
+            border-left: 4px solid #ff8b00;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+
+        .risk-level {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .risk-high { background: #ffebe6; color: #de350b; border: 2px solid #ff8f73; }
+        .risk-medium { background: #fff4e6; color: #ff8b00; border: 2px solid #ffab00; }
+        .risk-low { background: #e3fcef; color: #00875a; border: 2px solid #36b37e; }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+
+        .metric-card {
+            background: #f4f5f7;
             padding: 15px;
             border-radius: 8px;
-            margin: 10px 0;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #0052cc;
+        }
+
+        .metric-label {
+            font-size: 0.9rem;
+            color: #5e6c84;
+            margin-top: 5px;
         }
 
         @keyframes fadeIn {
@@ -625,8 +927,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             <p>Find epic PROJ-123 and all its stories</p>
                         </div>
                         <div class="example-query" onclick="useExampleQuery(this)">
-                            <h4>⚡ Priority Search</h4>
-                            <p>List all high priority issues in progress</p>
+                            <h4>🔒 Security Analysis</h4>
+                            <p>Analyze project PROJ for security risks</p>
+                        </div>
+                        <div class="example-query" onclick="showSecurityForm()">
+                            <h4>🛡️ Fraud & Security Impact</h4>
+                            <p>Get security analysis for a project</p>
                         </div>
                     </div>
                 </div>
@@ -742,7 +1048,129 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return 'todo';
         }
 
-        async function sendQuery() {
+        function showSecurityForm() {
+            const chatContainer = document.getElementById('chatContainer');
+            
+            // Remove welcome message if it exists
+            const welcomeMessage = chatContainer.querySelector('.welcome-message');
+            if (welcomeMessage) {
+                welcomeMessage.remove();
+            }
+            
+            const securityForm = `
+                <div class="security-form">
+                    <h3>🛡️ Fraud & Security Impact Analysis</h3>
+                    <p style="margin-bottom: 20px; color: #5e6c84;">
+                        Enter a Jira project key to get a comprehensive security risk assessment in simple terms.
+                    </p>
+                    <div class="form-group">
+                        <label for="projectKey">Project Key:</label>
+                        <input type="text" id="projectKey" placeholder="e.g., PROJ, DEV, SEC" maxlength="10">
+                    </div>
+                    <button class="analyze-button" onclick="analyzeProjectSecurity()" id="analyzeBtn">
+                        🔍 Analyze Security Impact
+                    </button>
+                </div>
+            `;
+            
+            chatContainer.innerHTML = securityForm;
+            document.getElementById('projectKey').focus();
+            
+            // Allow Enter key to submit
+            document.getElementById('projectKey').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    analyzeProjectSecurity();
+                }
+            });
+        }
+
+        async function analyzeProjectSecurity() {
+            const projectKey = document.getElementById('projectKey').value.trim().toUpperCase();
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            
+            if (!projectKey) {
+                alert('Please enter a project key');
+                return;
+            }
+            
+            // Show loading state
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerHTML = '🔄 Analyzing...';
+            
+            try {
+                const response = await fetch('/api/security-analysis', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        project_key: projectKey
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    displaySecurityResults(result);
+                } else {
+                    addMessage(`<div class="error-message">Error: ${result.error}</div>`, false);
+                }
+                
+            } catch (error) {
+                addMessage(`<div class="error-message">Network Error: ${error.message}</div>`, false);
+            } finally {
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerHTML = '🔍 Analyze Security Impact';
+            }
+        }
+
+        function displaySecurityResults(result) {
+            const riskLevel = result.summary.includes('HIGH RISK') ? 'high' : 
+                            result.summary.includes('MEDIUM RISK') ? 'medium' : 'low';
+            
+            const securityHtml = `
+                <div class="security-result">
+                    <h3 style="color: #0052cc; margin-bottom: 15px;">
+                        🛡️ Security Analysis: ${result.project_key}
+                    </h3>
+                    
+                    <div class="risk-level risk-${riskLevel}">
+                        ${result.summary}
+                    </div>
+                    
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-value">${result.metrics.total_issues}</div>
+                            <div class="metric-label">Total Issues</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${result.metrics.security_related}</div>
+                            <div class="metric-label">Security Related</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${result.metrics.security_percentage}%</div>
+                            <div class="metric-label">Security %</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">${result.metrics.completion_rate}%</div>
+                            <div class="metric-label">Completion Rate</div>
+                        </div>
+                    </div>
+                    
+                    <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; margin-top: 20px; white-space: pre-line;">
+                        ${result.analysis}
+                    </div>
+                    
+                    <div style="margin-top: 20px; text-align: center;">
+                        <button onclick="showSecurityForm()" style="background: #0052cc; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer;">
+                            🔍 Analyze Another Project
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            addMessage(securityHtml, false);
+        }
             const queryInput = document.getElementById('queryInput');
             const sendButton = document.getElementById('sendButton');
             const query = queryInput.value.trim();
@@ -796,6 +1224,38 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/query', methods=['POST'])
+def api_security_analysis():
+    """API endpoint for fraud & security impact analysis"""
+    try:
+        data = request.get_json()
+        
+        if not data or not data.get('project_key'):
+            return jsonify({
+                'success': False,
+                'error': 'Missing required field: project_key'
+            }), 400
+        
+        project_key = data['project_key'].strip().upper()
+        
+        # Initialize security analyzer
+        analyzer = JiraSecurityAnalyzer(
+            jira_url=JIRA_URL,
+            username=JIRA_USERNAME,
+            api_token=JIRA_TOKEN,
+            openai_api_key=OPENAI_API_KEY
+        )
+        
+        # Perform analysis
+        result = analyzer.analyze_security_impact(project_key)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Security analysis API error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 def api_query():
     """API endpoint to process Jira queries"""
     try:
