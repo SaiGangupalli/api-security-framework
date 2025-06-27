@@ -1144,61 +1144,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function displaySecurityResults(result) {
-            const riskLevel = result.summary.includes('CRITICAL') ? 'high' : 
-                            result.summary.includes('HIGH RISK') ? 'high' :
-                            result.summary.includes('MEDIUM RISK') ? 'medium' : 'low';
-            
-            const issue = result.issue_info;
-            const metrics = result.metrics;
-            
             const securityHtml = `
                 <div class="security-result">
-                    <h3 style="color: #0052cc; margin-bottom: 15px;">
-                        🛡️ Security Analysis: ${issue.key}
+                    <h3 style="color: #0052cc; margin-bottom: 20px;">
+                        🛡️ Security Analysis: ${result.issue_key}
                     </h3>
                     
-                    <div class="issue-details" style="background: #f8f9ff; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-                        <h4 style="color: #172b4d; margin-bottom: 10px;">${issue.summary}</h4>
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size: 0.9rem; color: #5e6c84;">
-                            <div><strong>Type:</strong> ${issue.type}</div>
-                            <div><strong>Status:</strong> ${issue.status}</div>
-                            <div><strong>Priority:</strong> ${issue.priority}</div>
-                            <div><strong>Assignee:</strong> ${issue.assignee}</div>
-                        </div>
-                    </div>
-                    
-                    <div class="risk-level risk-${riskLevel}">
-                        ${result.summary}
-                    </div>
-                    
-                    <div class="metrics-grid">
-                        <div class="metric-card">
-                            <div class="metric-value">${metrics.is_security_related ? 'YES' : 'NO'}</div>
-                            <div class="metric-label">Security Related</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-value">${metrics.is_high_priority ? 'YES' : 'NO'}</div>
-                            <div class="metric-label">High Priority</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-value">${metrics.related_issues_count}</div>
-                            <div class="metric-label">Related Issues</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-value">${metrics.related_security_count}</div>
-                            <div class="metric-label">Related Security</div>
-                        </div>
-                    </div>
-                    
-                    <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; margin-top: 20px; white-space: pre-line;">
+                    <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; white-space: pre-line; line-height: 1.6;">
                         ${result.analysis}
                     </div>
-                    
-                    ${metrics.security_keywords_found.length > 0 ? `
-                    <div style="margin-top: 15px; padding: 15px; background: #fff4e6; border-radius: 8px;">
-                        <strong>🔍 Security Keywords Found:</strong> ${metrics.security_keywords_found.join(', ')}
-                    </div>
-                    ` : ''}
                     
                     <div style="margin-top: 20px; text-align: center;">
                         <button onclick="showSecurityForm()" style="background: #0052cc; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer;">
